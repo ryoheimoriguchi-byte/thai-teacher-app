@@ -45,13 +45,25 @@ const speak = (text: string, speechLang: string) => {
     utterance.rate = 0.7;
     utterance.volume = 1.0;
     utterance.pitch = 1.0;
-    // voices が読み込まれるまで少し待つ
-    const voices = window.speechSynthesis.getVoices();
-    if (voices.length > 0) {
-      const voice = voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
-      if (voice) utterance.voice = voice;
+
+    const trySpeak = () => {
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length > 0) {
+        // 優先順位: Kyoko → ja-JP → th-TH → 言語一致
+        const preferred = voices.find((v) => v.name === "Kyoko") ||
+          voices.find((v) => v.name === "Kanya") ||
+          voices.find((v) => v.lang === speechLang) ||
+          voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
+        if (preferred) utterance.voice = preferred;
+      }
+      window.speechSynthesis.speak(utterance);
+    };
+
+    if (window.speechSynthesis.getVoices().length === 0) {
+      window.speechSynthesis.onvoiceschanged = trySpeak;
+    } else {
+      trySpeak();
     }
-    window.speechSynthesis.speak(utterance);
   } catch (e) {
     console.error("Speech error:", e);
   }
