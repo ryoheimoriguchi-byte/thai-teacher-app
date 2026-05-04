@@ -168,11 +168,7 @@ export default function ListeningPage() {
     setQuestion({ card: correctCard, options, correctAnswer: correctCard });
     setSelectedAnswer(null);
     setShowMastered(false);
-
-    if (direction === "word-to-en") {
-      setTimeout(() => speak(correctCard.word, speechLang), 300);
-    }
-  }, [cards, direction, wordMode, currentUser, speechLang, wordProgress]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, direction, wordMode, currentUser, wordProgress]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (cards.length > 0 && currentUser) generateQuestion();
@@ -231,11 +227,11 @@ export default function ListeningPage() {
       <h1 style={{ marginBottom: "0.5rem" }}>🎧 Word Listening</h1>
 
       <div style={{ display: "flex", gap: "8px", marginBottom: "1rem", flexWrap: "wrap" }}>
-       <a href="/" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🏠 Home</a>
-       <a href="/vocabulary" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>📋 Word List</a>
-       <a href="/index-card" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🃏 Index Card</a>
-       <a href="/listening" style={{ padding: "6px 14px", background: "#4caf50", color: "white", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎧 Listening</a>
-       <a href="/sentence-listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>💬 Sentence</a>
+        <a href="/" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🏠 Home</a>
+        <a href="/vocabulary" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>📋 Word List</a>
+        <a href="/index-card" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🃏 Index Card</a>
+        <a href="/listening" style={{ padding: "6px 14px", background: "#4caf50", color: "white", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎧 Listening</a>
+        <a href="/sentence-listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>💬 Sentence</a>
       </div>
 
       <div style={{ marginBottom: "8px", display: "flex", gap: "8px" }}>
@@ -279,7 +275,9 @@ export default function ListeningPage() {
         <>
           {direction === "word-to-en" ? (
             <div style={{ textAlign: "center", marginBottom: "2rem" }}>
-              <button onClick={() => speak(question.card.word, speechLang)}
+              <button
+                onClick={() => speak(question.card.word, speechLang)}
+                onTouchEnd={(e) => { e.preventDefault(); speak(question.card.word, speechLang); }}
                 style={{ fontSize: "48px", background: "#4caf50", color: "white", border: "none", borderRadius: "50%", width: "100px", height: "100px", cursor: "pointer" }}>
                 🔊
               </button>
@@ -331,7 +329,10 @@ export default function ListeningPage() {
                     )}
                   </span>
                   {direction === "en-to-word" && (
-                    <span onClick={(e) => { e.stopPropagation(); speak(opt.word, speechLang); }} style={{ fontSize: "18px", cursor: "pointer", padding: "4px 8px" }}>🔊</span>
+                    <span
+                      onClick={(e) => { e.stopPropagation(); speak(opt.word, speechLang); }}
+                      onTouchEnd={(e) => { e.stopPropagation(); e.preventDefault(); speak(opt.word, speechLang); }}
+                      style={{ fontSize: "18px", cursor: "pointer", padding: "4px 8px" }}>🔊</span>
                   )}
                 </button>
               );

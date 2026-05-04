@@ -39,13 +39,13 @@ type Direction = "word-to-en" | "en-to-word";
 type WordMode = "all" | "new-only";
 
 type WordProgress = {
-    card_id: string;
-    module: string;
-    direction: string;
-    consecutive_correct: number;
-    mastered: boolean;
-    mastered_at?: string | null;
-  };
+  card_id: string;
+  module: string;
+  direction: string;
+  consecutive_correct: number;
+  mastered: boolean;
+  mastered_at?: string | null;
+};
 
 const speak = (text: string, speechLang: string) => {
   window.speechSynthesis.cancel();
@@ -191,7 +191,7 @@ Return ONLY a valid JSON object with this exact structure:
   "usedCardIds": ["card-id-1", "card-id-2"]
 }
 
-For "usedWords", use the romanized pronunciation. For "usedCardIds", use the exact id values from the word list.
+For "usedWords", use the romanized pronunciation. For "usedCardIds", use the exact id values.
 Rules:
 - Sentence must be natural and beginner-friendly
 - Wrong options should be plausible but clearly different
@@ -244,10 +244,6 @@ Rules:
 
       setQuestion(parsed);
       setShuffledOptions(allOptions);
-
-      if (direction === "word-to-en") {
-        setTimeout(() => speak(parsed.sentence, speechLang), 300);
-      }
     } catch (error: unknown) {
       console.error(error);
       alert("Failed to generate sentence. Please try again.");
@@ -270,7 +266,6 @@ Rules:
       total: prev.total + 1,
     }));
 
-    // 使われた単語それぞれの進捗を更新
     const newlyMastered: string[] = [];
     for (const cardId of (question.usedCardIds || [])) {
       const currentProgress = getProgress(cardId, direction);
@@ -304,7 +299,6 @@ Rules:
     }
 
     if (newlyMastered.length > 0) setShowMastered(newlyMastered);
-
     await recordSession(currentUser.id, "sentence");
   };
 
@@ -321,11 +315,11 @@ Rules:
       <h1 style={{ marginBottom: "0.5rem" }}>💬 Sentence Listening</h1>
 
       <div style={{ display: "flex", gap: "8px", marginBottom: "1rem", flexWrap: "wrap" }}>
-       <a href="/" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🏠 Home</a>
-       <a href="/vocabulary" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>📋 Word List</a>
-       <a href="/index-card" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🃏 Index Card</a>
-       <a href="/listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎧 Listening</a>
-       <a href="/sentence-listening" style={{ padding: "6px 14px", background: "#4caf50", color: "white", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>💬 Sentence</a>
+        <a href="/" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🏠 Home</a>
+        <a href="/vocabulary" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>📋 Word List</a>
+        <a href="/index-card" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🃏 Index Card</a>
+        <a href="/listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎧 Listening</a>
+        <a href="/sentence-listening" style={{ padding: "6px 14px", background: "#4caf50", color: "white", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>💬 Sentence</a>
       </div>
 
       <div style={{ marginBottom: "8px", display: "flex", gap: "8px" }}>
@@ -361,30 +355,26 @@ Rules:
 
       {showMastered.length > 0 && (
         <div style={{ background: "#d4edda", border: "1px solid #28a745", borderRadius: "8px", padding: "12px", marginBottom: "1rem", textAlign: "center" }}>
-          <p style={{ margin: 0, color: "#28a745", fontWeight: "bold" }}>
-            ⭐ Word Mastered! {showMastered.join(", ")}
-          </p>
+          <p style={{ margin: 0, color: "#28a745", fontWeight: "bold" }}>⭐ Word Mastered! {showMastered.join(", ")}</p>
         </div>
       )}
 
-      {loading && (
-        <p style={{ textAlign: "center", color: "#666" }}>AI is creating a sentence...</p>
-      )}
+      {loading && <p style={{ textAlign: "center", color: "#666" }}>AI is creating a sentence...</p>}
 
       {question && !loading && (
         <>
           {direction === "word-to-en" ? (
             <div style={{ textAlign: "center", marginBottom: "2rem" }}>
-              <button onClick={() => speak(question.sentence, speechLang)}
+              <button
+                onClick={() => speak(question.sentence, speechLang)}
+                onTouchEnd={(e) => { e.preventDefault(); speak(question.sentence, speechLang); }}
                 style={{ fontSize: "48px", background: "#4caf50", color: "white", border: "none", borderRadius: "50%", width: "100px", height: "100px", cursor: "pointer" }}>
                 🔊
               </button>
               <p style={{ marginTop: "12px", fontSize: "20px", fontWeight: "bold", margin: "12px 0 4px" }}>{question.sentence}</p>
               <p style={{ color: "#666", fontSize: "14px", margin: 0 }}>{question.pronunciation}</p>
               {selectedAnswer && question.usedWords && question.usedWords.length > 0 && (
-                <p style={{ color: "#aaa", fontSize: "11px", marginTop: "6px" }}>
-                  Uses: {question.usedWords.join(" / ")}
-                </p>
+                <p style={{ color: "#aaa", fontSize: "11px", marginTop: "6px" }}>Uses: {question.usedWords.join(" / ")}</p>
               )}
             </div>
           ) : (
@@ -392,9 +382,7 @@ Rules:
               <p style={{ fontSize: "11px", color: "#aaa", margin: "0 0 6px" }}>English</p>
               <p style={{ fontSize: "20px", fontWeight: "500", margin: 0 }}>{question.sentence}</p>
               {selectedAnswer && question.usedWords && question.usedWords.length > 0 && (
-                <p style={{ color: "#aaa", fontSize: "11px", marginTop: "8px" }}>
-                  Uses: {question.usedWords.join(" / ")}
-                </p>
+                <p style={{ color: "#aaa", fontSize: "11px", marginTop: "8px" }}>Uses: {question.usedWords.join(" / ")}</p>
               )}
             </div>
           )}
@@ -425,7 +413,9 @@ Rules:
                     {showResult && isSelected && !isCorrect && " ✕"}
                   </span>
                   {direction === "en-to-word" && (
-                    <span onClick={(e) => { e.stopPropagation(); speak(opt.text, speechLang); }}
+                    <span
+                      onClick={(e) => { e.stopPropagation(); speak(opt.text, speechLang); }}
+                      onTouchEnd={(e) => { e.stopPropagation(); e.preventDefault(); speak(opt.text, speechLang); }}
                       style={{ fontSize: "18px", cursor: "pointer", padding: "4px 8px" }}>🔊</span>
                   )}
                 </button>
