@@ -27,9 +27,8 @@ type Card = {
   language: string;
 };
 
-// 2026年5月を最古の月として設定
 const MIN_YEAR = 2026;
-const MIN_MONTH = 4; // 0-indexed (4 = May)
+const MIN_MONTH = 4;
 
 export default function Home() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
@@ -104,7 +103,6 @@ export default function Home() {
   const streak = currentUser ? calcStreak() : 0;
   const studiedDates = currentUser ? getStudiedDates() : new Set<string>();
 
-  // カレンダー用
   const firstDay = new Date(calendarYear, calendarMonth, 1).getDay();
   const daysInMonth = new Date(calendarYear, calendarMonth + 1, 0).getDate();
   const todayStr = today.toISOString().split("T")[0];
@@ -131,6 +129,8 @@ export default function Home() {
     { module: "listening", direction: "en-to-word", label: "🎧 Listening", dir: `🇬🇧 → ${currentUser?.flag}` },
     { module: "sentence", direction: "word-to-en", label: "💬 Sentence", dir: `${currentUser?.flag} → 🇬🇧` },
     { module: "sentence", direction: "en-to-word", label: "💬 Sentence", dir: `🇬🇧 → ${currentUser?.flag}` },
+    { module: "speaking-word", direction: "en-to-word", label: "🎤 Speaking", dir: "Word" },
+    { module: "speaking-sentence", direction: "en-to-word", label: "🎤 Speaking", dir: "Sentence" },
   ];
 
   const weeklyMotivation = (count: number) => {
@@ -191,6 +191,7 @@ export default function Home() {
         <a href="/index-card" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🃏 Index Card</a>
         <a href="/listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎧 Listening</a>
         <a href="/sentence-listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>💬 Sentence</a>
+        <a href="/speaking" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎤 Speaking</a>
       </div>
 
       {/* 連続日数 */}
@@ -203,27 +204,13 @@ export default function Home() {
 
       {/* カレンダー */}
       <div style={{ background: "#f9f9f9", padding: "12px", borderRadius: "8px", marginBottom: "16px" }}>
-        {/* 月切り替えヘッダー */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-          <button
-            onClick={goPrevMonth}
-            disabled={!canGoPrev}
-            style={{ background: "none", border: "none", cursor: canGoPrev ? "pointer" : "default", color: canGoPrev ? "#333" : "#ccc", fontSize: "16px", padding: "4px 8px" }}
-          >
-            ←
-          </button>
-          <p style={{ fontSize: "13px", fontWeight: "500", margin: 0 }}>
-            {monthLabel} {calendarYear}
-          </p>
-          <button
-            onClick={goNextMonth}
-            disabled={!canGoNext}
-            style={{ background: "none", border: "none", cursor: canGoNext ? "pointer" : "default", color: canGoNext ? "#333" : "#ccc", fontSize: "16px", padding: "4px 8px" }}
-          >
-            →
-          </button>
+          <button onClick={goPrevMonth} disabled={!canGoPrev}
+            style={{ background: "none", border: "none", cursor: canGoPrev ? "pointer" : "default", color: canGoPrev ? "#333" : "#ccc", fontSize: "16px", padding: "4px 8px" }}>←</button>
+          <p style={{ fontSize: "13px", fontWeight: "500", margin: 0 }}>{monthLabel} {calendarYear}</p>
+          <button onClick={goNextMonth} disabled={!canGoNext}
+            style={{ background: "none", border: "none", cursor: canGoNext ? "pointer" : "default", color: canGoNext ? "#333" : "#ccc", fontSize: "16px", padding: "4px 8px" }}>→</button>
         </div>
-
         <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "4px", textAlign: "center", fontSize: "10px", color: "#999", marginBottom: "4px" }}>
           {["S","M","T","W","T","F","S"].map((d, i) => <div key={i}>{d}</div>)}
         </div>
@@ -236,16 +223,13 @@ export default function Home() {
             const isStudied = studiedDates.has(dateStr);
             const isFuture = dateStr > todayStr;
             return (
-              <div
-                key={day}
-                style={{
-                  aspectRatio: "1", borderRadius: "4px", display: "flex", alignItems: "center",
-                  justifyContent: "center", fontSize: "10px",
-                  background: isToday ? "#4caf50" : isStudied ? "#d4edda" : "#f0f0f0",
-                  color: isToday ? "white" : isStudied ? "#28a745" : isFuture ? "#ddd" : "#999",
-                  fontWeight: isToday ? "bold" : "normal",
-                }}
-              >
+              <div key={day} style={{
+                aspectRatio: "1", borderRadius: "4px", display: "flex", alignItems: "center",
+                justifyContent: "center", fontSize: "10px",
+                background: isToday ? "#4caf50" : isStudied ? "#d4edda" : "#f0f0f0",
+                color: isToday ? "white" : isStudied ? "#28a745" : isFuture ? "#ddd" : "#999",
+                fontWeight: isToday ? "bold" : "normal",
+              }}>
                 {isStudied && !isToday ? "✓" : day}
               </div>
             );
@@ -253,7 +237,7 @@ export default function Home() {
         </div>
       </div>
 
-      {/* 進捗バー */}
+      {/* 進捗バー - 6軸 */}
       <h3 style={{ fontSize: "14px", margin: "0 0 10px" }}>
         Progress{" "}
         <span style={{ fontSize: "11px", color: "#999", fontWeight: "normal" }}>
