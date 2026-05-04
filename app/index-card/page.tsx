@@ -30,11 +30,23 @@ type StudyDirection = "word-to-en" | "en-to-word";
 type ProgressFilter = "all" | "fully-mastered" | "not-fully-mastered";
 
 const speak = (text: string, speechLang: string) => {
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = speechLang;
-  utterance.rate = 0.7;
-  window.speechSynthesis.speak(utterance);
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = speechLang;
+    utterance.rate = 0.7;
+    utterance.volume = 1.0;
+    utterance.pitch = 1.0;
+    // voices が読み込まれるまで少し待つ
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length > 0) {
+      const voice = voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
+      if (voice) utterance.voice = voice;
+    }
+    window.speechSynthesis.speak(utterance);
+  } catch (e) {
+    console.error("Speech error:", e);
+  }
 };
 
 export default function IndexCardPage() {
