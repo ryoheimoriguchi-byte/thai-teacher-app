@@ -59,6 +59,7 @@ const speak = (text: string, speechLang: string) => {
       if (voices.length > 0) {
         const preferred = voices.find((v) => v.name === "Kyoko") ||
           voices.find((v) => v.name === "Kanya") ||
+          voices.find((v) => v.name === "Microsoft Pattara - Thai (Thailand)") ||
           voices.find((v) => v.lang === speechLang) ||
           voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
         if (preferred) utterance.voice = preferred;
@@ -77,10 +78,21 @@ const speak = (text: string, speechLang: string) => {
 
 const recordSession = async (userId: string, module: string) => {
   const today = new Date().toISOString().split("T")[0];
-  await supabase.from("study_sessions").upsert(
-    { user_id: userId, studied_date: today, module },
-    { onConflict: "user_id,studied_date,module" }
-  );
+  const { data: existing } = await supabase
+    .from("study_sessions")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("studied_date", today)
+    .eq("module", module)
+    .single();
+  if (!existing) {
+    const { error } = await supabase.from("study_sessions").insert({
+      user_id: userId,
+      studied_date: today,
+      module,
+    });
+    if (error) console.error("recordSession error:", error);
+  }
 };
 
 const updateWordProgress = async (

@@ -45,20 +45,18 @@ const speak = (text: string, speechLang: string) => {
     utterance.rate = 0.7;
     utterance.volume = 1.0;
     utterance.pitch = 1.0;
-
     const trySpeak = () => {
       const voices = window.speechSynthesis.getVoices();
       if (voices.length > 0) {
-        // 優先順位: Kyoko → ja-JP → th-TH → 言語一致
         const preferred = voices.find((v) => v.name === "Kyoko") ||
           voices.find((v) => v.name === "Kanya") ||
+          voices.find((v) => v.name === "Microsoft Pattara - Thai (Thailand)") ||
           voices.find((v) => v.lang === speechLang) ||
           voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
         if (preferred) utterance.voice = preferred;
       }
       window.speechSynthesis.speak(utterance);
     };
-
     if (window.speechSynthesis.getVoices().length === 0) {
       window.speechSynthesis.onvoiceschanged = trySpeak;
     } else {
@@ -71,10 +69,21 @@ const speak = (text: string, speechLang: string) => {
 
 const recordSession = async (userId: string, module: string) => {
   const today = new Date().toISOString().split("T")[0];
-  await supabase.from("study_sessions").upsert(
-    { user_id: userId, studied_date: today, module },
-    { onConflict: "user_id,studied_date,module" }
-  );
+  const { data: existing } = await supabase
+    .from("study_sessions")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("studied_date", today)
+    .eq("module", module)
+    .single();
+  if (!existing) {
+    const { error } = await supabase.from("study_sessions").insert({
+      user_id: userId,
+      studied_date: today,
+      module,
+    });
+    if (error) console.error("recordSession error:", error);
+  }
 };
 
 const updateWordProgress = async (
@@ -94,7 +103,7 @@ const updateWordProgress = async (
     ? new Date().toISOString()
     : currentProgress?.mastered_at ?? null;
 
-  await supabase.from("word_progress").upsert(
+  const { error } = await supabase.from("word_progress").upsert(
     {
       user_id: userId,
       card_id: cardId,
@@ -108,6 +117,7 @@ const updateWordProgress = async (
     },
     { onConflict: "user_id,card_id,module,direction" }
   );
+  if (error) console.error("updateWordProgress error:", error);
 
   return { consecutive, mastered };
 };
@@ -160,23 +170,16 @@ export default function ListeningPage() {
     if (!currentUser) return;
 
     let pool = cards;
-
     if (wordMode === "new-only") {
-      pool = cards.filter((c) => {
-        const p = getProgress(c.id, direction);
-        return !p?.mastered;
-      });
+      pool = cards.filter((c) => !getProgress(c.id, direction)?.mastered);
       if (pool.length < 4) pool = cards;
     }
-
     if (pool.length < 4) return;
 
     const correctCard = pool[Math.floor(Math.random() * pool.length)];
-
     const sameCategoryCards = cards.filter(
       (c) => c.id !== correctCard.id && c.category === correctCard.category
     );
-
     let wrongCards: Card[];
     if (sameCategoryCards.length >= 3) {
       wrongCards = sameCategoryCards.sort(() => Math.random() - 0.5).slice(0, 3);
@@ -210,15 +213,12 @@ export default function ListeningPage() {
 
     const currentProgress = getProgress(question.card.id, direction);
     const { mastered } = await updateWordProgress(
-      currentUser.id,
-      question.card.id,
-      "listening",
-      direction,
-      isCorrect,
-      currentProgress
+      currentUser.id, question.card.id, "listening", direction, isCorrect, currentProgress
     );
 
+    console.log("Recording session for user:", currentUser.id);
     await recordSession(currentUser.id, "listening");
+    console.log("Session recorded!");
 
     const consecutive = isCorrect ? (currentProgress?.consecutive_correct ?? 0) + 1 : 0;
     const masteredAt = mastered && !currentProgress?.mastered ? new Date().toISOString() : currentProgress?.mastered_at;

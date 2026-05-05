@@ -37,20 +37,18 @@ const speak = (text: string, speechLang: string) => {
     utterance.rate = 0.7;
     utterance.volume = 1.0;
     utterance.pitch = 1.0;
-
     const trySpeak = () => {
       const voices = window.speechSynthesis.getVoices();
       if (voices.length > 0) {
-        // 優先順位: Kyoko → ja-JP → th-TH → 言語一致
         const preferred = voices.find((v) => v.name === "Kyoko") ||
           voices.find((v) => v.name === "Kanya") ||
+          voices.find((v) => v.name === "Microsoft Pattara - Thai (Thailand)") ||
           voices.find((v) => v.lang === speechLang) ||
           voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
         if (preferred) utterance.voice = preferred;
       }
       window.speechSynthesis.speak(utterance);
     };
-
     if (window.speechSynthesis.getVoices().length === 0) {
       window.speechSynthesis.onvoiceschanged = trySpeak;
     } else {
@@ -107,12 +105,15 @@ export default function IndexCardPage() {
   const isMastered = (cardId: string, module: string, direction: string) =>
     wordProgress.find((p: WordProgress) => p.card_id === cardId && p.module === module && p.direction === direction)?.mastered ?? false;
 
+  // ★ 6軸に更新
   const getMasteredCount = (cardId: string) =>
     [
       isMastered(cardId, "listening", "word-to-en"),
       isMastered(cardId, "listening", "en-to-word"),
       isMastered(cardId, "sentence", "word-to-en"),
       isMastered(cardId, "sentence", "en-to-word"),
+      isMastered(cardId, "speaking-word", "en-to-word"),
+      isMastered(cardId, "speaking-sentence", "en-to-word"),
     ].filter(Boolean).length;
 
   const categories = Array.from(new Set(cards.map((c: Card) => c.category).filter(Boolean)));
@@ -121,8 +122,8 @@ export default function IndexCardPage() {
     const categoryOk = categoryFilter === "all" || card.category === categoryFilter;
     const count = getMasteredCount(card.id);
     let progressOk = true;
-    if (progressFilter === "fully-mastered") progressOk = count === 4;
-    else if (progressFilter === "not-fully-mastered") progressOk = count < 4;
+    if (progressFilter === "fully-mastered") progressOk = count === 6;
+    else if (progressFilter === "not-fully-mastered") progressOk = count < 6;
     return categoryOk && progressOk;
   });
 
@@ -158,7 +159,16 @@ export default function IndexCardPage() {
     </div>
   );
 
-  // 学習モード
+  // ★ 6軸バッジの定義
+  const badges = [
+    { m: "listening", d: "word-to-en", label: `🎧 ${langFlag}→🇬🇧` },
+    { m: "listening", d: "en-to-word", label: `🎧 🇬🇧→${langFlag}` },
+    { m: "sentence", d: "word-to-en", label: `💬 ${langFlag}→🇬🇧` },
+    { m: "sentence", d: "en-to-word", label: `💬 🇬🇧→${langFlag}` },
+    { m: "speaking-word", d: "en-to-word", label: `🎤 Word` },
+    { m: "speaking-sentence", d: "en-to-word", label: `🎤 Sentence` },
+  ] as { m: string; d: string; label: string }[];
+
   if (studyMode && studyCards.length > 0) {
     const card = studyCards[currentIndex];
     const langLabel = currentUser.language === "TH" ? "Thai" : "Japanese";
@@ -182,18 +192,12 @@ export default function IndexCardPage() {
           </span>
         </div>
 
-        {/* カード */}
         <div style={{ border: "1px solid #ccc", borderRadius: "12px", padding: "2rem", textAlign: "center", marginBottom: "1rem", minHeight: "200px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
           {card.category && <p style={{ fontSize: "12px", color: "#999", margin: "0 0 8px" }}>{card.category}</p>}
 
-          {/* 進捗バッジ */}
+          {/* ★ 6軸バッジ */}
           <div style={{ display: "flex", justifyContent: "center", gap: "4px", marginBottom: "12px", flexWrap: "wrap" }}>
-            {([
-              { m: "listening", d: "word-to-en", label: `🎧 ${langFlag}→🇬🇧` },
-              { m: "listening", d: "en-to-word", label: `🎧 🇬🇧→${langFlag}` },
-              { m: "sentence", d: "word-to-en", label: `💬 ${langFlag}→🇬🇧` },
-              { m: "sentence", d: "en-to-word", label: `💬 🇬🇧→${langFlag}` },
-            ] as { m: string; d: string; label: string }[]).map(({ m, d, label }) => (
+            {badges.map(({ m, d, label }) => (
               <span key={`${m}-${d}`} style={{
                 fontSize: "9px", padding: "1px 5px", borderRadius: "4px",
                 background: isMastered(card.id, m, d) ? "#d4edda" : "#f0f0f0",
@@ -208,7 +212,10 @@ export default function IndexCardPage() {
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
             <p style={{ fontSize: "28px", fontWeight: "bold", margin: 0 }}>{front.text}</p>
             {front.speakText && (
-              <button onClick={() => speak(front.speakText as string, speechLang)} style={{ fontSize: "20px", background: "none", border: "none", cursor: "pointer" }}>🔊</button>
+              <button
+                onClick={() => speak(front.speakText as string, speechLang)}
+                onTouchEnd={(e) => { e.preventDefault(); speak(front.speakText as string, speechLang); }}
+                style={{ fontSize: "20px", background: "none", border: "none", cursor: "pointer" }}>🔊</button>
             )}
           </div>
           {studyDirection === "word-to-en" && card.pronunciation && (
@@ -222,7 +229,10 @@ export default function IndexCardPage() {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "8px" }}>
                 <p style={{ fontSize: "18px", margin: 0 }}>{back.text}</p>
                 {back.speakText && (
-                  <button onClick={() => speak(back.speakText as string, speechLang)} style={{ fontSize: "18px", background: "none", border: "none", cursor: "pointer" }}>🔊</button>
+                  <button
+                    onClick={() => speak(back.speakText as string, speechLang)}
+                    onTouchEnd={(e) => { e.preventDefault(); speak(back.speakText as string, speechLang); }}
+                    style={{ fontSize: "18px", background: "none", border: "none", cursor: "pointer" }}>🔊</button>
                 )}
               </div>
               {studyDirection === "en-to-word" && card.pronunciation && (
@@ -235,13 +245,14 @@ export default function IndexCardPage() {
           )}
         </div>
 
-        <button onClick={() => setShowBack(!showBack)} style={{ width: "100%", marginBottom: "1rem", padding: "10px", border: "1px solid #ccc", borderRadius: "8px", background: "white", cursor: "pointer", color: "#111", fontSize: "16px" }}>
+        <button onClick={() => setShowBack(!showBack)}
+          style={{ width: "100%", marginBottom: "1rem", padding: "10px", border: "1px solid #ccc", borderRadius: "8px", background: "white", cursor: "pointer", color: "#111", fontSize: "16px" }}>
           {showBack ? "Hide" : `Show ${back.label}`}
         </button>
 
         <div style={{ textAlign: "center", marginBottom: "1rem" }}>
-          <span style={{ fontSize: "13px", color: masteredCount === 4 ? "#28a745" : "#999" }}>
-            {masteredCount === 4 ? "⭐ Fully Mastered!" : `${masteredCount} / 4 mastered`}
+          <span style={{ fontSize: "13px", color: masteredCount === 6 ? "#28a745" : "#999" }}>
+            {masteredCount === 6 ? "⭐ Fully Mastered!" : `${masteredCount} / 6 mastered`}
           </span>
         </div>
 
@@ -259,13 +270,11 @@ export default function IndexCardPage() {
     );
   }
 
-  // 一覧画面
   return (
     <main style={{ padding: "2rem", maxWidth: "600px", margin: "0 auto", background: "white", minHeight: "100vh", color: "#111" }}>
       <h1 style={{ marginBottom: "0.5rem" }}>🃏 Index Card</h1>
       {nav}
 
-      {/* 方向 */}
       <div style={{ marginBottom: "8px", display: "flex", gap: "8px" }}>
         {([
           { value: "word-to-en" as StudyDirection, label: `${langFlag} → 🇬🇧` },
@@ -278,7 +287,6 @@ export default function IndexCardPage() {
         ))}
       </div>
 
-      {/* カテゴリーフィルター */}
       <div style={{ marginBottom: "8px", display: "flex", gap: "6px", flexWrap: "wrap" }}>
         <button onClick={() => setCategoryFilter("all")}
           style={{ padding: "4px 10px", borderRadius: "12px", border: categoryFilter === "all" ? "2px solid #4caf50" : "1px solid #ccc", background: categoryFilter === "all" ? "#e8f5e9" : "white", cursor: "pointer", color: "#111", fontSize: "12px" }}>
@@ -292,11 +300,10 @@ export default function IndexCardPage() {
         ))}
       </div>
 
-      {/* 進捗フィルター */}
       <div style={{ marginBottom: "1rem", display: "flex", gap: "6px", flexWrap: "wrap" }}>
         {([
           { value: "all" as ProgressFilter, label: "All" },
-          { value: "fully-mastered" as ProgressFilter, label: "⭐ Fully mastered (4/4)" },
+          { value: "fully-mastered" as ProgressFilter, label: "⭐ Fully mastered (6/6)" },
           { value: "not-fully-mastered" as ProgressFilter, label: "🔜 Not fully mastered" },
         ]).map((opt) => (
           <button key={opt.value} onClick={() => setProgressFilter(opt.value)}
@@ -306,7 +313,6 @@ export default function IndexCardPage() {
         ))}
       </div>
 
-      {/* シャッフル + スタートボタン */}
       <div style={{ display: "flex", gap: "8px", marginBottom: "1.5rem", alignItems: "center" }}>
         <button onClick={() => setShuffle(!shuffle)}
           style={{ padding: "6px 14px", borderRadius: "20px", border: shuffle ? "2px solid #4caf50" : "1px solid #ccc", background: shuffle ? "#e8f5e9" : "white", cursor: "pointer", color: "#111", fontSize: "13px" }}>
@@ -318,19 +324,18 @@ export default function IndexCardPage() {
         </button>
       </div>
 
-      {/* カード一覧プレビュー */}
       <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
         {filteredCards.map((card: Card) => {
           const masteredCount = getMasteredCount(card.id);
           return (
-            <div key={card.id} style={{ padding: "10px 12px", border: "1px solid #eee", borderRadius: "8px", background: masteredCount === 4 ? "#f0fff4" : "white", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div key={card.id} style={{ padding: "10px 12px", border: "1px solid #eee", borderRadius: "8px", background: masteredCount === 6 ? "#f0fff4" : "white", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div>
                 <strong style={{ fontSize: "15px" }}>{card.word}</strong>
                 <span style={{ fontSize: "12px", color: "#aaa", marginLeft: "8px" }}>{card.pronunciation}</span>
                 <span style={{ fontSize: "13px", color: "#666", marginLeft: "8px" }}>{card.meaning}</span>
               </div>
-              <span style={{ fontSize: "12px", color: masteredCount === 4 ? "#28a745" : "#999", whiteSpace: "nowrap" }}>
-                {masteredCount === 4 ? "⭐" : `${masteredCount}/4`}
+              <span style={{ fontSize: "12px", color: masteredCount === 6 ? "#28a745" : "#999", whiteSpace: "nowrap" }}>
+                {masteredCount === 6 ? "⭐" : `${masteredCount}/6`}
               </span>
             </div>
           );

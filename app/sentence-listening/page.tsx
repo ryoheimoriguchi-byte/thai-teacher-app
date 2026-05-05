@@ -55,11 +55,9 @@ const speak = (text: string, speechLang: string) => {
     utterance.rate = 0.7;
     utterance.volume = 1.0;
     utterance.pitch = 1.0;
-
     const trySpeak = () => {
       const voices = window.speechSynthesis.getVoices();
       if (voices.length > 0) {
-        // 優先順位: Kyoko → ja-JP → th-TH → 言語一致
         const preferred = voices.find((v) => v.name === "Kyoko") ||
           voices.find((v) => v.name === "Kanya") ||
           voices.find((v) => v.lang === speechLang) ||
@@ -68,7 +66,6 @@ const speak = (text: string, speechLang: string) => {
       }
       window.speechSynthesis.speak(utterance);
     };
-
     if (window.speechSynthesis.getVoices().length === 0) {
       window.speechSynthesis.onvoiceschanged = trySpeak;
     } else {
@@ -81,10 +78,21 @@ const speak = (text: string, speechLang: string) => {
 
 const recordSession = async (userId: string, module: string) => {
   const today = new Date().toISOString().split("T")[0];
-  await supabase.from("study_sessions").upsert(
-    { user_id: userId, studied_date: today, module },
-    { onConflict: "user_id,studied_date,module" }
-  );
+  const { data: existing } = await supabase
+    .from("study_sessions")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("studied_date", today)
+    .eq("module", module)
+    .single();
+  if (!existing) {
+    const { error } = await supabase.from("study_sessions").insert({
+      user_id: userId,
+      studied_date: today,
+      module,
+    });
+    if (error) console.error("recordSession error:", error);
+  }
 };
 
 const updateWordProgress = async (
@@ -104,7 +112,7 @@ const updateWordProgress = async (
     ? new Date().toISOString()
     : currentProgress?.mastered_at ?? null;
 
-  await supabase.from("word_progress").upsert(
+  const { error } = await supabase.from("word_progress").upsert(
     {
       user_id: userId,
       card_id: cardId,
@@ -118,6 +126,7 @@ const updateWordProgress = async (
     },
     { onConflict: "user_id,card_id,module,direction" }
   );
+  if (error) console.error("updateWordProgress error:", error);
 
   return { consecutive, mastered, masteredAt: masteredAt ?? undefined };
 };
@@ -177,15 +186,10 @@ export default function SentenceListeningPage() {
     if (!currentUser) return;
 
     let pool = cards.filter((c) => c.language === filterLanguage);
-
     if (wordMode === "new-only") {
-      const filtered = pool.filter((c) => {
-        const p = getProgress(c.id, direction);
-        return !p?.mastered;
-      });
+      const filtered = pool.filter((c) => !getProgress(c.id, direction)?.mastered);
       if (filtered.length >= 5) pool = filtered;
     }
-
     if (pool.length < 5) return;
 
     setLoading(true);
@@ -194,7 +198,6 @@ export default function SentenceListeningPage() {
     setShowMastered([]);
 
     const sample = pool.sort(() => Math.random() - 0.5).slice(0, 15);
-
     let prompt = "";
 
     if (direction === "word-to-en") {
@@ -214,12 +217,8 @@ Return ONLY a valid JSON object with this exact structure:
   "usedWords": ["pronunciation1 = meaning1", "pronunciation2 = meaning2"],
   "usedCardIds": ["card-id-1", "card-id-2"]
 }
-
 For "usedWords", use the romanized pronunciation. For "usedCardIds", use the exact id values.
-Rules:
-- Sentence must be natural and beginner-friendly
-- Wrong options should be plausible but clearly different
-- Output ONLY the JSON, no markdown, no explanation`;
+Output ONLY the JSON, no markdown, no explanation`;
     } else {
       prompt = `Create a SHORT, simple English sentence that can be translated to ${langLabel}.
 
@@ -237,12 +236,8 @@ Return ONLY a valid JSON object with this exact structure:
   "usedWords": ["pronunciation1 = meaning1", "pronunciation2 = meaning2"],
   "usedCardIds": ["card-id-1", "card-id-2"]
 }
-
 For "usedWords" and pronunciations, use romanized text. For "usedCardIds", use the exact id values.
-Rules:
-- English sentence must be natural and beginner-friendly
-- Wrong options should be plausible but clearly different ${langLabel} sentences
-- Output ONLY the JSON, no markdown, no explanation`;
+Output ONLY the JSON, no markdown, no explanation`;
     }
 
     try {
@@ -251,13 +246,10 @@ Rules:
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: prompt }),
       });
-
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-
       const cleaned = data.reply.replace(/```json\n?|\n?```/g, "").trim();
       const parsed: SentenceQuestion = JSON.parse(cleaned);
-
       const allOptions: Option[] = [
         { text: parsed.correctMeaning, pronunciation: parsed.correctMeaningPronunciation || "" },
         ...parsed.wrongOptions.map((opt, i) => ({
@@ -265,7 +257,6 @@ Rules:
           pronunciation: parsed.wrongOptionsPronunciation?.[i] || "",
         })),
       ].sort(() => Math.random() - 0.5);
-
       setQuestion(parsed);
       setShuffledOptions(allOptions);
     } catch (error: unknown) {
@@ -294,16 +285,9 @@ Rules:
     for (const cardId of (question.usedCardIds || [])) {
       const currentProgress = getProgress(cardId, direction);
       const { mastered, masteredAt } = await updateWordProgress(
-        currentUser.id,
-        cardId,
-        "sentence",
-        direction,
-        isCorrect,
-        currentProgress
+        currentUser.id, cardId, "sentence", direction, isCorrect, currentProgress
       );
-
       const consecutive = isCorrect ? (currentProgress?.consecutive_correct ?? 0) + 1 : 0;
-
       setWordProgress((prev) => {
         const existing = prev.find((p) => p.card_id === cardId && p.direction === direction);
         if (existing) {
@@ -315,13 +299,11 @@ Rules:
         }
         return [...prev, { card_id: cardId, module: "sentence", direction, consecutive_correct: consecutive, mastered, mastered_at: masteredAt }];
       });
-
       if (mastered && !currentProgress?.mastered) {
         const card = cards.find((c) => c.id === cardId);
         if (card) newlyMastered.push(card.word);
       }
     }
-
     if (newlyMastered.length > 0) setShowMastered(newlyMastered);
     await recordSession(currentUser.id, "sentence");
   };

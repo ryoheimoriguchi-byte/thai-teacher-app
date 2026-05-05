@@ -42,6 +42,7 @@ const speak = (text: string, speechLang: string) => {
       if (voices.length > 0) {
         const preferred = voices.find((v) => v.name === "Kyoko") ||
           voices.find((v) => v.name === "Kanya") ||
+          voices.find((v) => v.name === "Microsoft Pattara - Thai (Thailand)") ||
           voices.find((v) => v.lang === speechLang) ||
           voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
         if (preferred) utterance.voice = preferred;
