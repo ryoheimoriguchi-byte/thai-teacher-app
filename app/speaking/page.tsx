@@ -43,36 +43,32 @@ type SentenceData = {
   cardIds: string[];
 };
 
+type HistoryItem = {
+  type: "word";
+  card: Card;
+} | {
+  type: "sentence";
+  data: SentenceData;
+};
+
 type Mode = "word" | "sentence";
 type WordMode = "all" | "new-only";
 
 const speak = (text: string, speechLang: string) => {
-  try {
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = speechLang;
-    utterance.rate = 0.7;
-    utterance.volume = 1.0;
-    utterance.pitch = 1.0;
-    const trySpeak = () => {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        const preferred = voices.find((v) => v.name === "Kyoko") ||
-          voices.find((v) => v.name === "Kanya") ||
-          voices.find((v) => v.name === "Microsoft Pattara - Thai (Thailand)") ||
-          voices.find((v) => v.lang === speechLang) ||
-          voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
-        if (preferred) utterance.voice = preferred;
-      }
-      window.speechSynthesis.speak(utterance);
-    };
-    if (window.speechSynthesis.getVoices().length === 0) {
-      window.speechSynthesis.onvoiceschanged = trySpeak;
-    } else {
-      trySpeak();
-    }
-  } catch (e) {
-    console.error("Speech error:", e);
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = speechLang;
+  utterance.rate = 0.7;
+  const trySpeak = () => {
+    const voices = window.speechSynthesis.getVoices();
+    const voice = voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
+    if (voice) utterance.voice = voice;
+    window.speechSynthesis.speak(utterance);
+  };
+  if (window.speechSynthesis.getVoices().length === 0) {
+    window.speechSynthesis.onvoiceschanged = trySpeak;
+  } else {
+    trySpeak();
   }
 };
 
@@ -138,6 +134,7 @@ export default function SpeakingPage() {
   const [wordMode, setWordMode] = useState<WordMode>("all");
   const [currentCard, setCurrentCard] = useState<Card | null>(null);
   const [sentenceData, setSentenceData] = useState<SentenceData | null>(null);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [result, setResult] = useState<SpeakingResult | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -181,21 +178,31 @@ export default function SpeakingPage() {
   const getProgress = (cardId: string) =>
     wordProgress.find((p) => p.card_id === cardId && p.module === moduleKey && p.direction === "en-to-word");
 
-  const pickNextCard = useCallback(() => {
+  const pickNextCard = useCallback((addToHistory = true) => {
     if (cards.length === 0) return;
     let pool = cards;
     if (wordMode === "new-only") {
       const filtered = cards.filter((c) => !getProgress(c.id)?.mastered);
       if (filtered.length > 0) pool = filtered;
     }
+
+    if (addToHistory && currentCard) {
+      setHistory((prev) => [...prev, { type: "word", card: currentCard }]);
+    }
+
     const card = pool[Math.floor(Math.random() * pool.length)];
     setCurrentCard(card);
     setResult(null);
     setShowMastered(false);
-  }, [cards, wordMode, wordProgress]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, wordMode, wordProgress, currentCard]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const generateSentence = useCallback(async () => {
+  const generateSentence = useCallback(async (addToHistory = true) => {
     if (cards.length < 3 || !currentUser) return;
+
+    if (addToHistory && sentenceData) {
+      setHistory((prev) => [...prev, { type: "sentence", data: sentenceData }]);
+    }
+
     setIsGenerating(true);
     setResult(null);
     setShowMastered(false);
@@ -239,12 +246,25 @@ Output ONLY the JSON, no markdown.`;
     } finally {
       setIsGenerating(false);
     }
-  }, [cards, wordMode, currentUser, langLabel]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, wordMode, currentUser, langLabel, sentenceData]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const goBack = () => {
+    if (history.length === 0) return;
+    const prev = history[history.length - 1];
+    setHistory((h) => h.slice(0, -1));
+    setResult(null);
+    setShowMastered(false);
+    if (prev.type === "word") {
+      setCurrentCard(prev.card);
+    } else {
+      setSentenceData(prev.data);
+    }
+  };
 
   useEffect(() => {
     if (cards.length > 0 && currentUser) {
-      if (mode === "word") pickNextCard();
-      else generateSentence();
+      if (mode === "word") pickNextCard(false);
+      else generateSentence(false);
     }
   }, [cards, mode, wordMode, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -302,7 +322,6 @@ Output ONLY the JSON, no markdown.`;
       const isPassed = data.score >= 4;
       setScore((prev) => ({ passed: prev.passed + (isPassed ? 1 : 0), total: prev.total + 1 }));
 
-      // 進捗を更新
       const cardIds = mode === "word"
         ? (currentCard ? [currentCard.id] : [])
         : (sentenceData?.cardIds ?? []);
@@ -341,15 +360,15 @@ Output ONLY the JSON, no markdown.`;
     else generateSentence();
   };
 
-  const getScoreColor = (score: number) => {
-    if (score >= 4) return "#28a745";
-    if (score === 3) return "#f39c12";
+  const getScoreColor = (s: number) => {
+    if (s >= 4) return "#28a745";
+    if (s === 3) return "#f39c12";
     return "#dc3545";
   };
 
-  const getScoreBg = (score: number) => {
-    if (score >= 4) return "#d4edda";
-    if (score === 3) return "#fff3cd";
+  const getScoreBg = (s: number) => {
+    if (s >= 4) return "#d4edda";
+    if (s === 3) return "#fff3cd";
     return "#f8d7da";
   };
 
@@ -379,7 +398,6 @@ Output ONLY the JSON, no markdown.`;
         <a href="/speaking" style={{ padding: "6px 14px", background: "#4caf50", color: "white", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎤 Speaking</a>
       </div>
 
-      {/* モード切り替え */}
       <div style={{ marginBottom: "8px", display: "flex", gap: "8px" }}>
         {([
           { value: "word" as Mode, label: `${langFlag} Word` },
@@ -392,7 +410,6 @@ Output ONLY the JSON, no markdown.`;
         ))}
       </div>
 
-      {/* All / Not yet mastered */}
       <div style={{ marginBottom: "1rem", display: "flex", gap: "8px" }}>
         {([
           { value: "all" as WordMode, label: "All words" },
@@ -435,8 +452,6 @@ Output ONLY the JSON, no markdown.`;
             {mode === "word" && currentCard?.category && (
               <p style={{ fontSize: "11px", color: "#aaa", margin: "0 0 12px" }}>Category: {currentCard.category}</p>
             )}
-
-            {/* 連続正解インジケーター */}
             {mode === "word" && currentCard && (
               <div style={{ display: "flex", justifyContent: "center", gap: "4px", marginBottom: "12px" }}>
                 {[0,1,2].map((i) => (
@@ -444,8 +459,6 @@ Output ONLY the JSON, no markdown.`;
                 ))}
               </div>
             )}
-
-            {/* お手本ボタン */}
             <button
               onClick={() => speak(targetText, speechLang)}
               onTouchEnd={(e) => { e.preventDefault(); speak(targetText, speechLang); }}
@@ -454,17 +467,20 @@ Output ONLY the JSON, no markdown.`;
             </button>
           </div>
 
-          {/* Skipボタン */}
-          <div style={{ textAlign: "right", marginBottom: "8px" }}>
+          {/* Back / Skip */}
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "12px" }}>
+            <button
+              onClick={goBack}
+              disabled={history.length === 0}
+              style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: "12px", background: "white", color: history.length === 0 ? "#ccc" : "#666", fontSize: "12px", cursor: history.length === 0 ? "default" : "pointer" }}>
+              ← Back
+            </button>
             <button
               onClick={handleNext}
               style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: "12px", background: "white", color: "#999", fontSize: "12px", cursor: "pointer" }}>
               Skip →
             </button>
           </div>
-
-          {/* 録音ボタン */}
-          <div style={{ textAlign: "center", marginBottom: "16px" }}></div>
 
           {/* 録音ボタン */}
           <div style={{ textAlign: "center", marginBottom: "16px" }}>

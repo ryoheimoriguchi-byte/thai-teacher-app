@@ -38,32 +38,20 @@ type WordProgress = {
 };
 
 const speak = (text: string, speechLang: string) => {
-  try {
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = speechLang;
-    utterance.rate = 0.7;
-    utterance.volume = 1.0;
-    utterance.pitch = 1.0;
-    const trySpeak = () => {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        const preferred = voices.find((v) => v.name === "Kyoko") ||
-          voices.find((v) => v.name === "Kanya") ||
-          voices.find((v) => v.name === "Microsoft Pattara - Thai (Thailand)") ||
-          voices.find((v) => v.lang === speechLang) ||
-          voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
-        if (preferred) utterance.voice = preferred;
-      }
-      window.speechSynthesis.speak(utterance);
-    };
-    if (window.speechSynthesis.getVoices().length === 0) {
-      window.speechSynthesis.onvoiceschanged = trySpeak;
-    } else {
-      trySpeak();
-    }
-  } catch (e) {
-    console.error("Speech error:", e);
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = speechLang;
+  utterance.rate = 0.7;
+  const trySpeak = () => {
+    const voices = window.speechSynthesis.getVoices();
+    const voice = voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
+    if (voice) utterance.voice = voice;
+    window.speechSynthesis.speak(utterance);
+  };
+  if (window.speechSynthesis.getVoices().length === 0) {
+    window.speechSynthesis.onvoiceschanged = trySpeak;
+  } else {
+    trySpeak();
   }
 };
 
@@ -118,7 +106,6 @@ const updateWordProgress = async (
     { onConflict: "user_id,card_id,module,direction" }
   );
   if (error) console.error("updateWordProgress error:", error);
-
   return { consecutive, mastered };
 };
 
@@ -129,6 +116,7 @@ export default function ListeningPage() {
   const [direction, setDirection] = useState<Direction>("word-to-en");
   const [wordMode, setWordMode] = useState<WordMode>("all");
   const [question, setQuestion] = useState<Question | null>(null);
+  const [history, setHistory] = useState<Question[]>([]);
   const [selectedAnswer, setSelectedAnswer] = useState<Card | null>(null);
   const [score, setScore] = useState({ correct: 0, total: 0 });
   const [showMastered, setShowMastered] = useState(false);
@@ -166,7 +154,7 @@ export default function ListeningPage() {
   const getProgress = (cardId: string, dir: string) =>
     wordProgress.find((p) => p.card_id === cardId && p.direction === dir);
 
-  const generateQuestion = useCallback(() => {
+  const generateQuestion = useCallback((addToHistory = true) => {
     if (!currentUser) return;
 
     let pool = cards;
@@ -192,13 +180,28 @@ export default function ListeningPage() {
     }
 
     const options = [correctCard, ...wrongCards].sort(() => Math.random() - 0.5);
-    setQuestion({ card: correctCard, options, correctAnswer: correctCard });
+    const newQuestion = { card: correctCard, options, correctAnswer: correctCard };
+
+    if (addToHistory && question) {
+      setHistory((prev) => [...prev, question]);
+    }
+
+    setQuestion(newQuestion);
     setSelectedAnswer(null);
     setShowMastered(false);
-  }, [cards, direction, wordMode, currentUser, wordProgress]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, direction, wordMode, currentUser, wordProgress, question]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const goBack = () => {
+    if (history.length === 0) return;
+    const prev = history[history.length - 1];
+    setHistory((h) => h.slice(0, -1));
+    setQuestion(prev);
+    setSelectedAnswer(null);
+    setShowMastered(false);
+  };
 
   useEffect(() => {
-    if (cards.length > 0 && currentUser) generateQuestion();
+    if (cards.length > 0 && currentUser) generateQuestion(false);
   }, [cards, direction, wordMode, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleAnswer = async (answer: Card) => {
@@ -215,10 +218,7 @@ export default function ListeningPage() {
     const { mastered } = await updateWordProgress(
       currentUser.id, question.card.id, "listening", direction, isCorrect, currentProgress
     );
-
-    console.log("Recording session for user:", currentUser.id);
     await recordSession(currentUser.id, "listening");
-    console.log("Session recorded!");
 
     const consecutive = isCorrect ? (currentProgress?.consecutive_correct ?? 0) + 1 : 0;
     const masteredAt = mastered && !currentProgress?.mastered ? new Date().toISOString() : currentProgress?.mastered_at;
@@ -328,6 +328,21 @@ export default function ListeningPage() {
             </div>
           )}
 
+          {/* Back / Skip */}
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+            <button
+              onClick={goBack}
+              disabled={history.length === 0}
+              style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: "12px", background: "white", color: history.length === 0 ? "#ccc" : "#666", fontSize: "12px", cursor: history.length === 0 ? "default" : "pointer" }}>
+              ← Back
+            </button>
+            <button
+              onClick={() => generateQuestion()}
+              style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: "12px", background: "white", color: "#999", fontSize: "12px", cursor: "pointer" }}>
+              Skip →
+            </button>
+          </div>
+
           <p style={{ marginBottom: "1rem", fontWeight: "bold" }}>
             {direction === "word-to-en" ? "What does it mean?" : `Which ${currentUser.language === "TH" ? "Thai" : "Japanese"} word means "${question.card.meaning}"?`}
           </p>
@@ -365,7 +380,7 @@ export default function ListeningPage() {
           </div>
 
           {selectedAnswer && (
-            <button onClick={generateQuestion}
+            <button onClick={() => generateQuestion()}
               style={{ width: "100%", padding: "12px", background: "#4caf50", color: "white", border: "none", borderRadius: "8px", fontSize: "16px", cursor: "pointer" }}>
               Next →
             </button>

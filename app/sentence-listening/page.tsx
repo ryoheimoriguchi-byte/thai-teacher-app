@@ -35,6 +35,11 @@ type Option = {
   pronunciation: string;
 };
 
+type HistoryItem = {
+  question: SentenceQuestion;
+  options: Option[];
+};
+
 type Direction = "word-to-en" | "en-to-word";
 type WordMode = "all" | "new-only";
 
@@ -48,31 +53,20 @@ type WordProgress = {
 };
 
 const speak = (text: string, speechLang: string) => {
-  try {
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = speechLang;
-    utterance.rate = 0.7;
-    utterance.volume = 1.0;
-    utterance.pitch = 1.0;
-    const trySpeak = () => {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        const preferred = voices.find((v) => v.name === "Kyoko") ||
-          voices.find((v) => v.name === "Kanya") ||
-          voices.find((v) => v.lang === speechLang) ||
-          voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
-        if (preferred) utterance.voice = preferred;
-      }
-      window.speechSynthesis.speak(utterance);
-    };
-    if (window.speechSynthesis.getVoices().length === 0) {
-      window.speechSynthesis.onvoiceschanged = trySpeak;
-    } else {
-      trySpeak();
-    }
-  } catch (e) {
-    console.error("Speech error:", e);
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = speechLang;
+  utterance.rate = 0.7;
+  const trySpeak = () => {
+    const voices = window.speechSynthesis.getVoices();
+    const voice = voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
+    if (voice) utterance.voice = voice;
+    window.speechSynthesis.speak(utterance);
+  };
+  if (window.speechSynthesis.getVoices().length === 0) {
+    window.speechSynthesis.onvoiceschanged = trySpeak;
+  } else {
+    trySpeak();
   }
 };
 
@@ -127,7 +121,6 @@ const updateWordProgress = async (
     { onConflict: "user_id,card_id,module,direction" }
   );
   if (error) console.error("updateWordProgress error:", error);
-
   return { consecutive, mastered, masteredAt: masteredAt ?? undefined };
 };
 
@@ -140,6 +133,7 @@ export default function SentenceListeningPage() {
   const [wordMode, setWordMode] = useState<WordMode>("all");
   const [question, setQuestion] = useState<SentenceQuestion | null>(null);
   const [shuffledOptions, setShuffledOptions] = useState<Option[]>([]);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [selectedAnswer, setSelectedAnswer] = useState<string | null>(null);
   const [score, setScore] = useState({ correct: 0, total: 0 });
   const [loading, setLoading] = useState(false);
@@ -182,7 +176,7 @@ export default function SentenceListeningPage() {
   const getProgress = (cardId: string, dir: string) =>
     wordProgress.find((p) => p.card_id === cardId && p.direction === dir);
 
-  const generateQuestion = useCallback(async () => {
+  const generateQuestion = useCallback(async (addToHistory = true) => {
     if (!currentUser) return;
 
     let pool = cards.filter((c) => c.language === filterLanguage);
@@ -191,6 +185,11 @@ export default function SentenceListeningPage() {
       if (filtered.length >= 5) pool = filtered;
     }
     if (pool.length < 5) return;
+
+    // 履歴に追加
+    if (addToHistory && question) {
+      setHistory((prev) => [...prev, { question, options: shuffledOptions }]);
+    }
 
     setLoading(true);
     setSelectedAnswer(null);
@@ -217,7 +216,6 @@ Return ONLY a valid JSON object with this exact structure:
   "usedWords": ["pronunciation1 = meaning1", "pronunciation2 = meaning2"],
   "usedCardIds": ["card-id-1", "card-id-2"]
 }
-For "usedWords", use the romanized pronunciation. For "usedCardIds", use the exact id values.
 Output ONLY the JSON, no markdown, no explanation`;
     } else {
       prompt = `Create a SHORT, simple English sentence that can be translated to ${langLabel}.
@@ -236,7 +234,6 @@ Return ONLY a valid JSON object with this exact structure:
   "usedWords": ["pronunciation1 = meaning1", "pronunciation2 = meaning2"],
   "usedCardIds": ["card-id-1", "card-id-2"]
 }
-For "usedWords" and pronunciations, use romanized text. For "usedCardIds", use the exact id values.
 Output ONLY the JSON, no markdown, no explanation`;
     }
 
@@ -265,10 +262,20 @@ Output ONLY the JSON, no markdown, no explanation`;
     } finally {
       setLoading(false);
     }
-  }, [cards, filterLanguage, speechLang, direction, wordMode, currentUser, langLabel]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, filterLanguage, speechLang, direction, wordMode, currentUser, langLabel, question, shuffledOptions]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const goBack = () => {
+    if (history.length === 0) return;
+    const prev = history[history.length - 1];
+    setHistory((h) => h.slice(0, -1));
+    setQuestion(prev.question);
+    setShuffledOptions(prev.options);
+    setSelectedAnswer(null);
+    setShowMastered([]);
+  };
 
   useEffect(() => {
-    if (cards.length > 0 && currentUser) generateQuestion();
+    if (cards.length > 0 && currentUser) generateQuestion(false);
   }, [cards, filterLanguage, direction, wordMode, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleAnswer = async (answer: string) => {
@@ -394,6 +401,21 @@ Output ONLY the JSON, no markdown, no explanation`;
             </div>
           )}
 
+          {/* Back / Skip */}
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+            <button
+              onClick={goBack}
+              disabled={history.length === 0}
+              style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: "12px", background: "white", color: history.length === 0 ? "#ccc" : "#666", fontSize: "12px", cursor: history.length === 0 ? "default" : "pointer" }}>
+              ← Back
+            </button>
+            <button
+              onClick={() => generateQuestion()}
+              style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: "12px", background: "white", color: "#999", fontSize: "12px", cursor: "pointer" }}>
+              Skip →
+            </button>
+          </div>
+
           <p style={{ marginBottom: "1rem", fontWeight: "bold" }}>
             {direction === "word-to-en" ? "What does it mean?" : `Which ${langLabel} translation is correct?`}
           </p>
@@ -431,7 +453,7 @@ Output ONLY the JSON, no markdown, no explanation`;
           </div>
 
           {selectedAnswer && (
-            <button onClick={generateQuestion}
+            <button onClick={() => generateQuestion()}
               style={{ width: "100%", padding: "12px", background: "#4caf50", color: "white", border: "none", borderRadius: "8px", fontSize: "16px", cursor: "pointer" }}>
               Next →
             </button>
