@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
-import { USERS, AppUser } from "../lib/users";
+import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -147,8 +147,23 @@ export default function SpeakingPage() {
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
     if (userId) {
-      const user = USERS.find((u) => u.id === userId);
-      if (user) setCurrentUser(user);
+      const fetchUser = async () => {
+        const { data } = await supabase
+          .from("users")
+          .select("*")
+          .eq("id", userId)
+          .single();
+        if (data) {
+          const language = LANGUAGE_MAP[data.id] ?? "TH";
+          setCurrentUser({
+            id: data.id,
+            name: data.name,
+            language,
+            flag: FLAG_MAP[language],
+          });
+        }
+      };
+      fetchUser();
     }
   }, []);
 

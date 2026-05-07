@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { createClient } from "@supabase/supabase-js";
-import { USERS, AppUser } from "./lib/users";
+import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "./lib/users";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -32,13 +32,44 @@ const MIN_MONTH = 4;
 
 export default function Home() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
+  const [users, setUsers] = useState<AppUser[]>([]);
   const [cards, setCards] = useState<Card[]>([]);
   const [wordProgress, setWordProgress] = useState<WordProgress[]>([]);
   const [studySessions, setStudySessions] = useState<StudySession[]>([]);
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserLanguage, setNewUserLanguage] = useState<"TH" | "JP">("TH");
+  const [showAddUser, setShowAddUser] = useState(false);
 
   const today = new Date();
   const [calendarYear, setCalendarYear] = useState(today.getFullYear());
   const [calendarMonth, setCalendarMonth] = useState(today.getMonth());
+
+  useEffect(() => {
+    const fetchUsers = async () => {
+      const { data } = await supabase.from("users").select("*").order("created_at");
+      if (data) {
+        const appUsers: AppUser[] = data.map((u: { id: string; name: string }) => {
+          const language = LANGUAGE_MAP[u.id] ?? "TH";
+          return {
+            id: u.id,
+            name: u.name,
+            language,
+            flag: FLAG_MAP[language],
+          };
+        });
+        setUsers(appUsers);
+      }
+    };
+    fetchUsers();
+  }, []);
+
+  useEffect(() => {
+    const userId = localStorage.getItem("currentUserId");
+    if (userId && users.length > 0) {
+      const user = users.find((u) => u.id === userId);
+      if (user) setCurrentUser(user);
+    }
+  }, [users]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -140,33 +171,117 @@ export default function Home() {
     return { text: `+${count} words this week ⭐ Amazing!`, color: "#4caf50" };
   };
 
+  const getUserEmoji = (user: AppUser) => {
+    if (user.name === "Dad") return "👨";
+    if (user.name === "Mirei") return "👧";
+    return "👤";
+  };
+
+  const addNewUser = async () => {
+    if (!newUserName.trim()) return;
+    const { data, error } = await supabase
+      .from("users")
+      .insert({ name: newUserName })
+      .select()
+      .single();
+    if (error) {
+      console.error("Error adding user:", error);
+      alert("Failed to add user. Please try again.");
+      return;
+    }
+    if (data) {
+      const newUser: AppUser = {
+        id: data.id,
+        name: data.name,
+        language: newUserLanguage,
+        flag: FLAG_MAP[newUserLanguage],
+      };
+      LANGUAGE_MAP[data.id] = newUserLanguage;
+      setUsers((prev) => [...prev, newUser]);
+      setNewUserName("");
+      setShowAddUser(false);
+    }
+  };
+
   if (!currentUser) {
     return (
       <main style={{ padding: "2rem", maxWidth: "480px", margin: "0 auto", background: "white", minHeight: "100vh", color: "#111" }}>
         <h1 style={{ marginBottom: "0.5rem" }}>🌏 Language Teacher AI</h1>
-        <p style={{ color: "#666", fontSize: "14px", marginBottom: "2rem" }}>Who are you?</p>
-        <div style={{ display: "flex", gap: "16px" }}>
-          {USERS.map((user) => (
+        <p style={{ color: "#666", fontSize: "14px", marginBottom: "1.5rem" }}>Who are you?</p>
+
+        <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", marginBottom: "1.5rem" }}>
+          {users.map((user) => (
             <button
               key={user.id}
               onClick={() => { localStorage.setItem("currentUserId", user.id); setCurrentUser(user); }}
               onTouchEnd={(e) => { e.preventDefault(); localStorage.setItem("currentUserId", user.id); setCurrentUser(user); }}
               style={{
-                flex: 1, padding: "24px 12px", border: "1px solid #ccc", borderRadius: "12px",
+                flex: "1 1 120px", padding: "20px 12px", border: "1px solid #ccc", borderRadius: "12px",
                 background: "white", cursor: "pointer", textAlign: "center",
                 WebkitTapHighlightColor: "transparent",
               } as React.CSSProperties}
             >
-              <div style={{ fontSize: "36px", marginBottom: "8px" }}>
-                {user.name === "Dad" ? "👨" : "👧"}
-              </div>
-              <div style={{ fontWeight: "bold", fontSize: "16px", color: "#111" }}>{user.name}</div>
-              <div style={{ fontSize: "13px", color: "#666", marginTop: "4px" }}>
+              <div style={{ fontSize: "32px", marginBottom: "6px" }}>{getUserEmoji(user)}</div>
+              <div style={{ fontWeight: "bold", fontSize: "15px", color: "#111" }}>{user.name}</div>
+              <div style={{ fontSize: "12px", color: "#666", marginTop: "4px" }}>
                 {user.flag} {user.language === "TH" ? "Thai" : "Japanese"}
               </div>
             </button>
           ))}
+
+          <button
+            onClick={() => setShowAddUser(!showAddUser)}
+            style={{
+              flex: "1 1 120px", padding: "20px 12px", border: "1px dashed #ccc", borderRadius: "12px",
+              background: "white", cursor: "pointer", textAlign: "center", color: "#999",
+              WebkitTapHighlightColor: "transparent",
+            } as React.CSSProperties}
+          >
+            <div style={{ fontSize: "32px", marginBottom: "6px" }}>➕</div>
+            <div style={{ fontSize: "14px" }}>Add User</div>
+          </button>
         </div>
+
+        {showAddUser && (
+          <div style={{ border: "1px solid #eee", borderRadius: "12px", padding: "16px", background: "#f9f9f9" }}>
+            <p style={{ fontSize: "14px", fontWeight: "500", margin: "0 0 12px", color: "#111" }}>New User</p>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              <input
+                placeholder="Name"
+                value={newUserName}
+                onChange={(e) => setNewUserName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && addNewUser()}
+                style={{ padding: "8px 12px", border: "1px solid #ccc", borderRadius: "8px", fontSize: "16px", color: "#111", background: "white" }}
+              />
+              <select
+                value={newUserLanguage}
+                onChange={(e) => setNewUserLanguage(e.target.value as "TH" | "JP")}
+                style={{ padding: "8px 12px", border: "1px solid #ccc", borderRadius: "8px", fontSize: "16px", color: "#111", background: "white" }}
+              >
+                <option value="TH">🇹🇭 Thai</option>
+                <option value="JP">🇯🇵 Japanese</option>
+              </select>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button
+                  onClick={() => setShowAddUser(false)}
+                  style={{ flex: 1, padding: "10px", border: "1px solid #ccc", borderRadius: "8px", background: "white", color: "#666", cursor: "pointer", fontSize: "14px" }}>
+                  Cancel
+                </button>
+                <button
+                  onClick={addNewUser}
+                  disabled={!newUserName.trim()}
+                  style={{
+                    flex: 1, padding: "10px",
+                    background: newUserName.trim() ? "#4caf50" : "#ccc",
+                    color: "white", border: "none", borderRadius: "8px",
+                    cursor: newUserName.trim() ? "pointer" : "default", fontSize: "14px"
+                  }}>
+                  + Add
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     );
   }
@@ -181,7 +296,7 @@ export default function Home() {
           onClick={() => { localStorage.removeItem("currentUserId"); setCurrentUser(null); }}
           style={{ fontSize: "13px", color: "#999", background: "none", border: "none", cursor: "pointer" }}
         >
-          {currentUser.name === "Dad" ? "👨" : "👧"} {currentUser.name} ✕
+          {getUserEmoji(currentUser)} {currentUser.name} ✕
         </button>
       </div>
 
@@ -194,7 +309,6 @@ export default function Home() {
         <a href="/speaking" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎤 Speaking</a>
       </div>
 
-      {/* 連続日数 */}
       <div style={{ background: "linear-gradient(135deg, #ff6b35, #f7931e)", color: "white", padding: "16px", borderRadius: "12px", marginBottom: "16px", textAlign: "center" }}>
         <p style={{ fontSize: "36px", margin: 0, fontWeight: "bold" }}>🔥 {streak}</p>
         <p style={{ fontSize: "14px", margin: "4px 0 0" }}>
@@ -202,7 +316,6 @@ export default function Home() {
         </p>
       </div>
 
-      {/* カレンダー */}
       <div style={{ background: "#f9f9f9", padding: "12px", borderRadius: "8px", marginBottom: "16px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
           <button onClick={goPrevMonth} disabled={!canGoPrev}
@@ -237,7 +350,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* 進捗バー - 6軸 */}
       <h3 style={{ fontSize: "14px", margin: "0 0 10px" }}>
         Progress{" "}
         <span style={{ fontSize: "11px", color: "#999", fontWeight: "normal" }}>
