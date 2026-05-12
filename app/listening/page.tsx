@@ -172,26 +172,35 @@ export default function ListeningPage() {
   const generateQuestion = useCallback((addToHistory = true) => {
     if (!currentUser) return;
 
-    let pool = cards;
-    if (wordMode === "new-only") {
-      pool = cards.filter((c) => !getProgress(c.id, direction)?.mastered);
-      if (pool.length < 4) pool = cards;
-    }
-    if (pool.length < 4) return;
+    // Total deck must supply 4 distinct cards (1 correct + 3 distractors).
+    if (cards.length < 4) return;
 
-    const correctCard = pool[Math.floor(Math.random() * pool.length)];
-    const sameCategoryCards = cards.filter(
-      (c) => c.id !== correctCard.id && c.category === correctCard.category
-    );
-    let wrongCards: Card[];
-    if (sameCategoryCards.length >= 3) {
-      wrongCards = sameCategoryCards.sort(() => Math.random() - 0.5).slice(0, 3);
-    } else {
-      const otherCards = cards
-        .filter((c) => c.id !== correctCard.id && c.category !== correctCard.category)
-        .sort(() => Math.random() - 0.5)
-        .slice(0, 3 - sameCategoryCards.length);
-      wrongCards = [...sameCategoryCards, ...otherCards];
+    let targetPool = cards;
+    if (wordMode === "new-only") {
+      targetPool = cards.filter((c) => !getProgress(c.id, direction)?.mastered);
+      if (targetPool.length === 0) {
+        if (addToHistory && question) {
+          setHistory((prev) => [...prev, question]);
+        }
+        setQuestion(null);
+        setSelectedAnswer(null);
+        setShowMastered(false);
+        return;
+      }
+    }
+
+    const correctCard = targetPool[Math.floor(Math.random() * targetPool.length)];
+    // Distractors: prefer same category as correct answer; fill remainder from other categories if needed.
+    const sameCategoryCards = cards
+      .filter((c) => c.id !== correctCard.id && c.category === correctCard.category)
+      .sort(() => Math.random() - 0.5);
+    const otherCards = cards
+      .filter((c) => c.id !== correctCard.id && c.category !== correctCard.category)
+      .sort(() => Math.random() - 0.5);
+    const wrongCards: Card[] = [...sameCategoryCards.slice(0, 3)];
+    if (wrongCards.length < 3) {
+      const need = 3 - wrongCards.length;
+      wrongCards.push(...otherCards.slice(0, need));
     }
 
     const options = [correctCard, ...wrongCards].sort(() => Math.random() - 0.5);
@@ -304,6 +313,26 @@ export default function ListeningPage() {
           {wordProgress.filter((p) => p.direction === direction && p.mastered).length} mastered ✓
         </span>
       </p>
+
+      {wordMode === "new-only" &&
+        cards.length > 0 &&
+        cards.every((c) => getProgress(c.id, direction)?.mastered === true) && (
+        <div
+          style={{
+            background: "#e8f5e9",
+            border: "1px solid #4caf50",
+            borderRadius: "8px",
+            padding: "24px",
+            marginBottom: "1rem",
+            textAlign: "center",
+          }}
+        >
+          <p style={{ margin: 0, color: "#2e7d32", fontWeight: "bold", fontSize: "18px" }}>All Done!</p>
+          <p style={{ margin: "8px 0 0", color: "#666", fontSize: "14px" }}>
+            Every word is mastered for this direction. Switch to &quot;All words&quot; or try another mode.
+          </p>
+        </div>
+      )}
 
       {showMastered && (
         <div style={{ background: "#d4edda", border: "1px solid #28a745", borderRadius: "8px", padding: "12px", marginBottom: "1rem", textAlign: "center" }}>

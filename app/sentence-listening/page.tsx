@@ -28,6 +28,8 @@ type SentenceQuestion = {
   wrongOptionsPronunciation: string[];
   usedWords: string[];
   usedCardIds: string[];
+  /** Category label used for distractor sentences (matches card.category) */
+  primaryCategory?: string;
 };
 
 type Option = {
@@ -88,6 +90,219 @@ const recordSession = async (userId: string, module: string) => {
     if (error) console.error("recordSession error:", error);
   }
 };
+
+function shuffleArray<T>(items: T[]): T[] {
+  return [...items].sort(() => Math.random() - 0.5);
+}
+
+/** Few-shot + policy for 3 distractors (order: noun-only, verb/predicate, broader rewrite). */
+const DISTRACTOR_POLICY_EN_CHOICES = `
+Distractor design (wrongOptions is EXACTLY 3 strings; ORDER matters — index 0, 1, 2):
+
+GOAL: Memory/comprehension difficulty. The learner must read or listen to the WHOLE sentence — not spot one changing slot like a cloze test.
+
+FORBIDDEN pattern (do NOT produce this across the set of three):
+- All three wrong answers share the SAME sentence skeleton and only ONE slot changes (e.g. only the noun after "The ___ is far", or only the number in "I buy ___ apples", or only the noun in "Where is the ___").
+
+REQUIRED pattern (each wrong answer uses a DIFFERENT kind of error):
+- wrongOptions[0] — NOUN-SWAP: Change exactly ONE noun phrase (subject or object) vs correctMeaning. Prefer a replacement noun from the same broad theme as primaryCategory when you can (see category word list). The rest of the sentence should stay similar, but this must NOT be a mere numeral change (e.g. do NOT do "five"→"six" only).
+- wrongOptions[1] — VERB / PREDICATE CHANGE: Change the main verb or the core predicate meaning. The sentence must NOT be the same template as [0] with only a different noun — change how the situation is described (e.g. "is far" → "is near", or "buy" → "eat").
+- wrongOptions[2] — BROADER REWRITE: Change at least TWO meaningful content elements (e.g. subject + verb, or quantity + object, or scene). The overall clause pattern may differ more from correctMeaning than [0] and [1]. Still a plausible full sentence, but clearly not the right translation.
+
+BAD examples (cloze-like — only one slot varies across options — NEVER do this for all three):
+- Correct: "Where is the bathroom?" → BAD set: "Where is the kitchen?", "Where is the station?", "Where is the library?"
+- Correct: "I buy five apples" → BAD set: "I buy three apples", "I buy ten apples", "I buy six apples"
+- Correct: "The market is far" → BAD set: "The school is far", "The library is far", "The park is far"
+
+GOOD examples (mixed error types — OK):
+- Correct: "I buy five apples" → GOOD set:
+  [0] "I buy five oranges" (noun swap)
+  [1] "I eat five apples" OR "I sell five apples" (verb change)
+  [2] "She wants three apples" OR "We make a pie" (multiple changes)
+
+Do NOT copy the exact words of these examples into your output — apply the same *ideas* to the actual correctMeaning you generate.
+`.trim();
+
+const DISTRACTOR_POLICY_L1_CHOICES = `
+Distractor design (wrongOptions is EXACTLY 3 full sentences in the TARGET study language (Thai script or Japanese as appropriate); ORDER matters — index 0, 1, 2):
+
+GOAL: The learner must understand the whole sentence, not match one differing word.
+
+FORBIDDEN: All three wrong sentences share one rigid template and only one slot changes (like a cloze).
+
+REQUIRED:
+- wrongOptions[0] — NOUN-SWAP: Change exactly one nominal element vs correctMeaning. Prefer nouns from the same broad theme as primaryCategory when possible. Do NOT only change a numeral.
+- wrongOptions[1] — VERB / PREDICATE CHANGE: Change the main verb or how the situation is described; must not be the same "template" as [0].
+- wrongOptions[2] — BROADER REWRITE: At least two content elements change; wording may diverge more from correctMeaning while staying plausible and wrong.
+
+BAD (cloze-like): Correct 「くまがさんびきいます」→ three options that only swap the animal noun with the same pattern.
+GOOD: Correct 「りんごをいつつかいます」→ [0] 「みかんをいつつかいます」(one noun swap), [1] 「りんごをたべます」(verb/predicate), [2] 「かのじょはみっつのバナナがほしいです」(broader rewrite).
+GOOD pattern: [0] noun swap in same theme, [1] change verb/predicate, [2] rephrase with several differences.
+
+wrongOptionsPronunciation must align with wrongOptions (romanization).
+`.trim();
+
+function buildWordsGroupedByCategory(pool: Card[]): string {
+  const by = new Map<string, Card[]>();
+  for (const c of pool) {
+    const key = c.category?.trim() || "(uncategorized)";
+    if (!by.has(key)) by.set(key, []);
+    by.get(key)!.push(c);
+  }
+  return [...by.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([cat, arr]) => {
+      const lines = arr.map(
+        (c) => `- ${c.word} (${c.pronunciation}) = ${c.meaning} [id:${c.id}]`
+      );
+      return `Category "${cat}":\n${lines.join("\n")}`;
+    })
+    .join("\n\n");
+}
+
+function majorityCategoryFromUsedIds(usedCardIds: string[] | undefined, allCards: Card[]): string {
+  const counts = new Map<string, number>();
+  for (const id of usedCardIds || []) {
+    const cat = allCards.find((c) => c.id === id)?.category?.trim() || "(uncategorized)";
+    counts.set(cat, (counts.get(cat) || 0) + 1);
+  }
+  if (counts.size === 0) return "(uncategorized)";
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+}
+
+function wrongOptionLooksSentenceLike(text: string, direction: Direction): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (direction === "word-to-en") {
+    // English distractors: reject bare single-word answers like "Frog"
+    if (!/\s/.test(t) && t.length < 24) return false;
+    return true;
+  }
+  // Target-language distractors (often no spaces): require a minimal clause length
+  return t.length >= 8;
+}
+
+function normalizeWrongOptions(
+  correctMeaning: string,
+  wrongOptions: unknown,
+  wrongProns: unknown,
+  direction: Direction,
+  strictSentenceShape: boolean
+): { texts: string[]; prons: string[] } {
+  const correct = String(correctMeaning || "").trim();
+  const arr = Array.isArray(wrongOptions) ? wrongOptions : [];
+  const prArr = Array.isArray(wrongProns) ? wrongProns : [];
+  const outT: string[] = [];
+  const outP: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < arr.length; i++) {
+    const t = String(arr[i] ?? "").trim();
+    if (!t || t === correct || seen.has(t)) continue;
+    if (strictSentenceShape && !wrongOptionLooksSentenceLike(t, direction)) continue;
+    seen.add(t);
+    outP.push(direction === "en-to-word" ? String(prArr[i] ?? "").trim() : "");
+    outT.push(t);
+    if (outT.length >= 3) break;
+  }
+  return { texts: outT, prons: outP };
+}
+
+async function callSentenceChat(message: string): Promise<string> {
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data.reply as string;
+}
+
+function parseJsonFromChat(reply: string): unknown {
+  const cleaned = reply.replace(/```json\n?|\n?```/g, "").trim();
+  return JSON.parse(cleaned);
+}
+
+async function repairWrongOptionsViaChat(params: {
+  direction: Direction;
+  langLabel: string;
+  filterLanguage: string;
+  categoryLabel: string;
+  vocabularyLines: string;
+  stimulusSentence: string;
+  correctMeaning: string;
+  correctPronunciation: string;
+  strictShape: boolean;
+}): Promise<{ wrongOptions: string[]; wrongOptionsPronunciation: string[] }> {
+  const {
+    direction,
+    langLabel,
+    filterLanguage,
+    categoryLabel,
+    vocabularyLines,
+    stimulusSentence,
+    correctMeaning,
+    correctPronunciation,
+    strictShape,
+  } = params;
+
+  const targetWrongLang =
+    direction === "word-to-en"
+      ? "English"
+      : `${langLabel} (${filterLanguage === "TH" ? "Thai script" : "Japanese hiragana/katakana/kanji as appropriate"})`;
+
+  const policyBlock =
+    direction === "word-to-en" ? DISTRACTOR_POLICY_EN_CHOICES : DISTRACTOR_POLICY_L1_CHOICES;
+
+  const shapeRule = strictShape
+    ? "Each wrongOption MUST be a complete sentence in the target language for this quiz mode (not a single word or bare noun)."
+    : "Each wrongOption should be a full sentence if possible; avoid single-word answers.";
+
+  const pronRule =
+    direction === "en-to-word"
+      ? `wrongOptionsPronunciation must have 3 romanized strings aligned with wrongOptions.`
+      : `wrongOptionsPronunciation must be ["","",""].`;
+
+  const message = `You are fixing distractors for a ${langLabel} listening quiz.
+
+Return ONLY a JSON object (no markdown) with this exact shape:
+{
+  "wrongOptions": ["distractor 0", "distractor 1", "distractor 2"],
+  "wrongOptionsPronunciation": ${direction === "en-to-word" ? '["romaji0","romaji1","romaji2"]' : '["","",""]'}
+}
+
+${policyBlock}
+
+Context:
+- primaryCategory (soft hint for noun swaps in wrongOptions[0] only): "${categoryLabel}"
+- Stimulus shown to the student: """${stimulusSentence}"""
+- Correct choice text (exact string when correct): """${correctMeaning}"""
+- Correct pronunciation (reference): """${correctPronunciation}"""
+
+Vocabulary reference (wrongOptions[0] should prefer replacement nouns from the primaryCategory block when helpful; wrongOptions[1] and [2] may use any items from the broader list — do not restrict all three to one category):
+${vocabularyLines}
+
+Rules:
+1. Output exactly 3 items in wrongOptions in the fixed roles: [0] noun-swap only, [1] verb/predicate change, [2] broader multi-part rewrite — see policy above. Do NOT output three cloze-style variants.
+2. Each wrongOption must be in ${targetWrongLang}.
+3. ${shapeRule}
+4. Wrong answers must be plausible but NOT synonymous with the correct choice.
+5. ${pronRule}`;
+
+  const reply = await callSentenceChat(message);
+  const parsed = parseJsonFromChat(reply) as {
+    wrongOptions?: unknown;
+    wrongOptionsPronunciation?: unknown;
+  };
+  const norm = normalizeWrongOptions(
+    correctMeaning,
+    parsed.wrongOptions,
+    parsed.wrongOptionsPronunciation,
+    direction,
+    strictShape
+  );
+  return { wrongOptions: norm.texts, wrongOptionsPronunciation: norm.prons };
+}
 
 const updateWordProgress = async (
   userId: string,
@@ -181,6 +396,10 @@ export default function SentenceListeningPage() {
     fetchData();
   }, [currentUser]);
 
+  useEffect(() => {
+    if (currentUser) setFilterLanguage(currentUser.language);
+  }, [currentUser]);
+
   const speechLang = filterLanguage === "TH" ? "th-TH" : "ja-JP";
   const langLabel = filterLanguage === "TH" ? "Thai" : "Japanese";
   const langFlag = currentUser?.flag ?? "🇹🇭";
@@ -191,12 +410,28 @@ export default function SentenceListeningPage() {
   const generateQuestion = useCallback(async (addToHistory = true) => {
     if (!currentUser) return;
 
-    let pool = cards.filter((c) => c.language === filterLanguage);
+    const basePool = cards.filter((c) => c.language === filterLanguage);
+
+    let workPool: Card[];
     if (wordMode === "new-only") {
-      const filtered = pool.filter((c) => !getProgress(c.id, direction)?.mastered);
-      if (filtered.length >= 5) pool = filtered;
+      const targetPool = basePool.filter((c) => !getProgress(c.id, direction)?.mastered);
+      if (targetPool.length === 0) {
+        if (addToHistory && question) {
+          setHistory((prev) => [...prev, { question, options: shuffledOptions }]);
+        }
+        setQuestion(null);
+        setShuffledOptions([]);
+        setSelectedAnswer(null);
+        setShowMastered([]);
+        setLoading(false);
+        return;
+      }
+      workPool = targetPool;
+    } else {
+      workPool = basePool;
     }
-    if (pool.length < 5) return;
+
+    if (workPool.length < 5) return;
 
     // 履歴に追加
     if (addToHistory && question) {
@@ -208,59 +443,200 @@ export default function SentenceListeningPage() {
     setQuestion(null);
     setShowMastered([]);
 
-    const sample = pool.sort(() => Math.random() - 0.5).slice(0, 15);
+    const sample = shuffleArray(workPool).slice(0, Math.min(15, workPool.length));
+    const wordsByCategory = buildWordsGroupedByCategory(workPool);
+
     let prompt = "";
 
     if (direction === "word-to-en") {
-      prompt = `Create a SHORT, simple ${langLabel} sentence using 2-3 of these vocabulary words.
+      prompt = `Create a SHORT, simple ${langLabel} sentence using 2-3 vocabulary words from the mixed list below (you may pick words from different categories for a natural sentence).
 
-Available words:
+Available words (mixed):
 ${sample.map((c) => `- ${c.word} (${c.pronunciation}) = ${c.meaning} [id:${c.id}]`).join("\n")}
+
+All words grouped by category (for distractors — see rules below):
+${wordsByCategory}
 
 Return ONLY a valid JSON object with this exact structure:
 {
-  "sentence": "the sentence in ${filterLanguage === "TH" ? "Thai script" : "Japanese (hiragana/katakana)"}",
+  "sentence": "the sentence in ${filterLanguage === "TH" ? "Thai script" : "Japanese (hiragana/katakana/kanji as appropriate)"}",
   "pronunciation": "romanized pronunciation",
-  "correctMeaning": "English translation",
+  "correctMeaning": "the correct English translation as a full sentence (not a single word)",
   "correctMeaningPronunciation": "",
-  "wrongOptions": ["plausible wrong English meaning 1", "plausible wrong English meaning 2", "plausible wrong English meaning 3"],
+  "primaryCategory": "category label from the headings below — soft hint for choosing replacement nouns in wrongOptions[0] (same broad theme when possible)",
+  "wrongOptions": ["English distractor 0 — noun swap only", "English distractor 1 — verb/predicate change", "English distractor 2 — broader rewrite"],
   "wrongOptionsPronunciation": ["", "", ""],
   "usedWords": ["pronunciation1 = meaning1", "pronunciation2 = meaning2"],
   "usedCardIds": ["card-id-1", "card-id-2"]
 }
+
+${DISTRACTOR_POLICY_EN_CHOICES}
+
+Category vocabulary (soft preference for wrongOptions[0] noun swaps when a good fit exists; wrongOptions[1] and [2] may use any reasonable English):
+Refer to the "All words grouped by category" section above.
+
+Additional rules:
+- primaryCategory should match the heading that best fits the main noun/theme of correctMeaning (for guiding [0] only).
+- Do NOT make all three wrongOptions follow the same cloze template (see FORBIDDEN above).
+- wrongOptions must each be a complete English sentence (not a single word).
 Output ONLY the JSON, no markdown, no explanation`;
     } else {
       prompt = `Create a SHORT, simple English sentence that can be translated to ${langLabel}.
 
-Use vocabulary from these words:
+Use vocabulary from this mixed list (you may pick words from different categories for a natural sentence):
 ${sample.map((c) => `- ${c.word} (${c.pronunciation}) = ${c.meaning} [id:${c.id}]`).join("\n")}
+
+All words grouped by category (for distractors — see rules below):
+${wordsByCategory}
 
 Return ONLY a valid JSON object with this exact structure:
 {
   "sentence": "the English sentence",
   "pronunciation": "",
-  "correctMeaning": "the correct ${langLabel} translation in ${filterLanguage === "TH" ? "Thai script" : "Japanese (hiragana/katakana)"}",
+  "correctMeaning": "the correct ${langLabel} translation as a full sentence in ${filterLanguage === "TH" ? "Thai script" : "Japanese (hiragana/katakana/kanji as appropriate)"}",
   "correctMeaningPronunciation": "romanized pronunciation of correctMeaning",
-  "wrongOptions": ["plausible wrong ${langLabel} translation 1", "plausible wrong ${langLabel} translation 2", "plausible wrong ${langLabel} translation 3"],
-  "wrongOptionsPronunciation": ["romanized pronunciation of wrong 1", "romanized pronunciation of wrong 2", "romanized pronunciation of wrong 3"],
+  "primaryCategory": "category label — soft hint for wrongOptions[0] nominal swaps (same broad theme when possible)",
+  "wrongOptions": ["${langLabel} distractor 0 — noun swap only", "${langLabel} distractor 1 — verb/predicate change", "${langLabel} distractor 2 — broader rewrite"],
+  "wrongOptionsPronunciation": ["romanized pronunciation of wrong 0", "romanized pronunciation of wrong 1", "romanized pronunciation of wrong 2"],
   "usedWords": ["pronunciation1 = meaning1", "pronunciation2 = meaning2"],
   "usedCardIds": ["card-id-1", "card-id-2"]
 }
+
+${DISTRACTOR_POLICY_L1_CHOICES}
+
+Vocabulary: use the mixed list and grouped-by-category list above. wrongOptions[0] should prefer nouns from the same broad theme as primaryCategory when swapping one nominal; wrongOptions[1] and [2] may freely use other words from the deck lists for natural ${langLabel}.
+
+Additional rules:
+- Do NOT make all three wrongOptions share one rigid template with only one slot different (cloze-like).
+- Each wrongOptions entry must be a full ${langLabel} sentence (not one word).
 Output ONLY the JSON, no markdown, no explanation`;
     }
 
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: prompt }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      const cleaned = data.reply.replace(/```json\n?|\n?```/g, "").trim();
-      const parsed: SentenceQuestion = JSON.parse(cleaned);
+      const reply = await callSentenceChat(prompt);
+      const parsed = parseJsonFromChat(reply) as SentenceQuestion;
+
+      const correctMeaning = String(parsed.correctMeaning ?? "").trim();
+      parsed.correctMeaning = correctMeaning;
+
+      const resolveCategoryLabel = (): string => {
+        const ai = parsed.primaryCategory?.trim();
+        const keys = new Set(
+          workPool.map((c) => c.category?.trim() || "(uncategorized)")
+        );
+        if (ai) {
+          if (keys.has(ai)) return ai;
+          const lower = ai.toLowerCase();
+          for (const k of keys) {
+            if (k.toLowerCase() === lower) return k;
+          }
+        }
+        return majorityCategoryFromUsedIds(parsed.usedCardIds, cards);
+      };
+
+      const categoryLabel = resolveCategoryLabel();
+      parsed.primaryCategory = categoryLabel;
+
+      const linesForCategory = (pool: Card[], cat: string) => {
+        const c = cat.trim();
+        let rows = pool.filter(
+          (x) => (x.category?.trim() || "(uncategorized)") === c
+        );
+        if (rows.length < 4) {
+          rows = pool.filter(
+            (x) =>
+              (x.category?.trim() || "").toLowerCase() === c.toLowerCase()
+          );
+        }
+        if (rows.length === 0) rows = pool;
+        return rows
+          .map(
+            (x) => `- ${x.word} (${x.pronunciation}) = ${x.meaning} [id:${x.id}]`
+          )
+          .join("\n");
+      };
+
+      let norm = normalizeWrongOptions(
+        correctMeaning,
+        parsed.wrongOptions,
+        parsed.wrongOptionsPronunciation,
+        direction,
+        true
+      );
+
+      const stimulus = parsed.sentence;
+
+      if (norm.texts.length < 3) {
+        const catLines = linesForCategory(workPool, categoryLabel);
+        const broadSample = shuffleArray(workPool)
+          .slice(0, 28)
+          .map((x) => `- ${x.word} (${x.pronunciation}) = ${x.meaning} [id:${x.id}]`)
+          .join("\n");
+        const vocabStrict =
+          `Primary category "${categoryLabel}" — prefer replacement nouns here for wrongOptions[0]:\n${catLines}\n\n` +
+          `Broader deck sample (use freely for wrongOptions[1] and [2]):\n${broadSample}`;
+        const repaired = await repairWrongOptionsViaChat({
+          direction,
+          langLabel,
+          filterLanguage,
+          categoryLabel,
+          vocabularyLines: vocabStrict,
+          stimulusSentence: stimulus,
+          correctMeaning,
+          correctPronunciation: parsed.correctMeaningPronunciation || "",
+          strictShape: true,
+        });
+        if (repaired.wrongOptions.length >= 3) {
+          norm = {
+            texts: repaired.wrongOptions.slice(0, 3),
+            prons: repaired.wrongOptionsPronunciation.slice(0, 3),
+          };
+        }
+      }
+
+      if (norm.texts.length < 3) {
+        const vocabWide = workPool
+          .map(
+            (x) => `- ${x.word} (${x.pronunciation}) = ${x.meaning} [id:${x.id}]`
+          )
+          .join("\n");
+        const repaired2 = await repairWrongOptionsViaChat({
+          direction,
+          langLabel,
+          filterLanguage,
+          categoryLabel: `${categoryLabel} (any topic from list)`,
+          vocabularyLines: vocabWide,
+          stimulusSentence: stimulus,
+          correctMeaning,
+          correctPronunciation: parsed.correctMeaningPronunciation || "",
+          strictShape: false,
+        });
+        if (repaired2.wrongOptions.length >= 3) {
+          norm = {
+            texts: repaired2.wrongOptions.slice(0, 3),
+            prons: repaired2.wrongOptionsPronunciation.slice(0, 3),
+          };
+        }
+      }
+
+      if (norm.texts.length < 3) {
+        alert(
+          "Could not build 3 sentence distractors. Please tap Skip or refresh and try again."
+        );
+        return;
+      }
+
+      parsed.wrongOptions = norm.texts.slice(0, 3);
+      parsed.wrongOptionsPronunciation =
+        direction === "en-to-word"
+          ? ["", "", ""].map((_, i) => norm.prons[i] ?? "")
+          : ["", "", ""];
+
       const allOptions: Option[] = [
-        { text: parsed.correctMeaning, pronunciation: parsed.correctMeaningPronunciation || "" },
+        {
+          text: parsed.correctMeaning,
+          pronunciation: parsed.correctMeaningPronunciation || "",
+        },
         ...parsed.wrongOptions.map((opt, i) => ({
           text: opt,
           pronunciation: parsed.wrongOptionsPronunciation?.[i] || "",
@@ -378,6 +754,28 @@ Output ONLY the JSON, no markdown, no explanation`;
           {wordProgress.filter((p) => p.direction === direction && p.mastered).length} mastered ✓
         </span>
       </p>
+
+      {wordMode === "new-only" &&
+        cards.filter((c) => c.language === filterLanguage).length > 0 &&
+        cards
+          .filter((c) => c.language === filterLanguage)
+          .every((c) => getProgress(c.id, direction)?.mastered === true) && (
+        <div
+          style={{
+            background: "#e8f5e9",
+            border: "1px solid #4caf50",
+            borderRadius: "8px",
+            padding: "24px",
+            marginBottom: "1rem",
+            textAlign: "center",
+          }}
+        >
+          <p style={{ margin: 0, color: "#2e7d32", fontWeight: "bold", fontSize: "18px" }}>All Done!</p>
+          <p style={{ margin: "8px 0 0", color: "#666", fontSize: "14px" }}>
+            Every word is mastered for Sentence · this direction. Switch to &quot;All words&quot; or try another mode.
+          </p>
+        </div>
+      )}
 
       {showMastered.length > 0 && (
         <div style={{ background: "#d4edda", border: "1px solid #28a745", borderRadius: "8px", padding: "12px", marginBottom: "1rem", textAlign: "center" }}>

@@ -72,6 +72,10 @@ const speak = (text: string, speechLang: string) => {
   }
 };
 
+function shuffleArray<T>(items: T[]): T[] {
+  return [...items].sort(() => Math.random() - 0.5);
+}
+
 const recordSession = async (userId: string, module: string) => {
   const today = new Date().toISOString().split("T")[0];
   const { data: existing } = await supabase
@@ -198,7 +202,16 @@ export default function SpeakingPage() {
     let pool = cards;
     if (wordMode === "new-only") {
       const filtered = cards.filter((c) => !getProgress(c.id)?.mastered);
-      if (filtered.length > 0) pool = filtered;
+      if (filtered.length === 0) {
+        if (addToHistory && currentCard) {
+          setHistory((prev) => [...prev, { type: "word", card: currentCard }]);
+        }
+        setCurrentCard(null);
+        setResult(null);
+        setShowMastered(false);
+        return;
+      }
+      pool = filtered;
     }
 
     if (addToHistory && currentCard) {
@@ -212,7 +225,46 @@ export default function SpeakingPage() {
   }, [cards, wordMode, wordProgress, currentCard]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const generateSentence = useCallback(async (addToHistory = true) => {
-    if (cards.length < 3 || !currentUser) return;
+    if (!currentUser) return;
+
+    let workPool = cards;
+    if (wordMode === "new-only") {
+      const filtered = cards.filter((c) => !getProgress(c.id)?.mastered);
+      if (filtered.length === 0) {
+        if (addToHistory && sentenceData) {
+          setHistory((prev) => [...prev, { type: "sentence", data: sentenceData }]);
+        }
+        setSentenceData(null);
+        setResult(null);
+        setShowMastered(false);
+        setIsGenerating(false);
+        return;
+      }
+      workPool = filtered;
+    }
+
+    if (workPool.length < 3) {
+      alert("Need at least 3 words to generate a sentence.");
+      return;
+    }
+
+    const byCategory = new Map<string, Card[]>();
+    for (const c of workPool) {
+      const key = c.category || "";
+      if (!byCategory.has(key)) byCategory.set(key, []);
+      byCategory.get(key)!.push(c);
+    }
+    const ranked = [...byCategory.entries()].sort((a, b) => b[1].length - a[1].length);
+    const eligible = ranked.filter(([, arr]) => arr.length >= 3);
+    const chosen = eligible.length > 0
+      ? eligible[Math.floor(Math.random() * eligible.length)]
+      : ranked[0];
+    if (!chosen || chosen[1].length < 3) {
+      alert("Need at least 3 words in one category.");
+      return;
+    }
+    const [, categoryPool] = chosen;
+    const categoryLabel = chosen[0] || "(uncategorized)";
 
     if (addToHistory && sentenceData) {
       setHistory((prev) => [...prev, { type: "sentence", data: sentenceData }]);
@@ -223,14 +275,9 @@ export default function SpeakingPage() {
     setShowMastered(false);
     setSentenceData(null);
 
-    let pool = cards;
-    if (wordMode === "new-only") {
-      const filtered = cards.filter((c) => !getProgress(c.id)?.mastered);
-      if (filtered.length >= 3) pool = filtered;
-    }
-
-    const sample = pool.sort(() => Math.random() - 0.5).slice(0, 10);
+    const sample = shuffleArray(categoryPool).slice(0, Math.min(10, categoryPool.length));
     const prompt = `Create a SHORT, simple ${langLabel} sentence using 2-3 of these words.
+All vocabulary is from the SAME category: "${categoryLabel}".
 
 Available words:
 ${sample.map((c) => `- ${c.word} (${c.pronunciation}) = ${c.meaning} [id:${c.id}]`).join("\n")}
@@ -395,10 +442,24 @@ Output ONLY the JSON, no markdown.`;
     );
   }
 
+  const allDoneWord =
+    mode === "word" &&
+    wordMode === "new-only" &&
+    cards.length > 0 &&
+    cards.every((c) => getProgress(c.id)?.mastered === true);
+
+  const allDoneSentence =
+    mode === "sentence" &&
+    wordMode === "new-only" &&
+    cards.length > 0 &&
+    cards.every((c) => getProgress(c.id)?.mastered === true);
+
   const targetText = mode === "word" ? currentCard?.word : sentenceData?.sentence;
   const targetPron = mode === "word" ? currentCard?.pronunciation : sentenceData?.pronunciation;
   const targetMeaning = mode === "word" ? currentCard?.meaning : sentenceData?.meaning;
-  const isLoading = isGenerating || (!currentCard && mode === "word");
+  const isLoading =
+    isGenerating ||
+    (mode === "word" && !allDoneWord && currentCard === null && cards.length > 0);
 
   return (
     <main style={{ padding: "2rem", maxWidth: "600px", margin: "0 auto", background: "white", minHeight: "100vh", color: "#111" }}>
@@ -447,6 +508,24 @@ Output ONLY the JSON, no markdown.`;
       {showMastered && (
         <div style={{ background: "#d4edda", border: "1px solid #28a745", borderRadius: "8px", padding: "12px", marginBottom: "1rem", textAlign: "center" }}>
           <p style={{ margin: 0, color: "#28a745", fontWeight: "bold" }}>⭐ Word Mastered! 3 times 4/5 or above!</p>
+        </div>
+      )}
+
+      {(allDoneWord || allDoneSentence) && (
+        <div
+          style={{
+            background: "#e8f5e9",
+            border: "1px solid #4caf50",
+            borderRadius: "8px",
+            padding: "24px",
+            marginBottom: "1rem",
+            textAlign: "center",
+          }}
+        >
+          <p style={{ margin: 0, color: "#2e7d32", fontWeight: "bold", fontSize: "18px" }}>All Done!</p>
+          <p style={{ margin: "8px 0 0", color: "#666", fontSize: "14px" }}>
+            Every word is mastered for Speaking · this mode. Switch to &quot;All words&quot; or try another exercise.
+          </p>
         </div>
       )}
 
