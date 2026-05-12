@@ -160,6 +160,34 @@ function buildWordsGroupedByCategory(pool: Card[]): string {
     .join("\n\n");
 }
 
+/** Guidelines for the stimulus + correct answer only (not wrongOptions). */
+function buildStimulusNaturalnessBlock(direction: Direction, langLabel: string): string {
+  const shared = `
+NATURALNESS — applies to the stimulus sentence and the correct answer (correctMeaning) only.
+(Does not change the distractor rules below: wrongOptions[0]/[1]/[2] roles, soft category hint, and cloze-avoidance stay as specified.)
+
+- Prefer wording that is natural and commonly used in real daily conversation over "maximally using rare combinations from the list".
+- Avoid grammatically correct but unusual or awkward collocations; if a combination feels forced, pick different words from the sample.
+- Target everyday situations a child or beginner would encounter (home, school, playground, shops, family, simple observations).
+- For counting or describing animals/things, use idiomatic patterns natives would say (not odd verb–object pairings).
+
+English few-shot (apply the same judgment to ${langLabel} where that language carries the stimulus or the correct answer):
+- GOOD: "I see three birds in the sky." (natural)
+- BAD: "I know three birds." (possible grammar but unnatural as an everyday sentence for this idea)
+- GOOD: "There are three cats in the garden."
+- BAD: "I have three cats knowledge." (unnatural / non-idiomatic)
+`.trim();
+
+  if (direction === "word-to-en") {
+    return `${shared}
+
+In this mode: "${langLabel}" text goes in "sentence"; natural English goes in "correctMeaning". Both must sound like something a native would say to a child, not a textbook-only line.`;
+  }
+  return `${shared}
+
+In this mode: natural English goes in "sentence"; "${langLabel}" goes in "correctMeaning". Both must sound natural to native speakers at a child-friendly beginner level.`;
+}
+
 function majorityCategoryFromUsedIds(usedCardIds: string[] | undefined, allCards: Card[]): string {
   const counts = new Map<string, number>();
   for (const id of usedCardIds || []) {
@@ -286,7 +314,7 @@ Rules:
 1. Output exactly 3 items in wrongOptions in the fixed roles: [0] noun-swap only, [1] verb/predicate change, [2] broader multi-part rewrite — see policy above. Do NOT output three cloze-style variants.
 2. Each wrongOption must be in ${targetWrongLang}.
 3. ${shapeRule}
-4. Wrong answers must be plausible but NOT synonymous with the correct choice.
+4. Wrong answers must be plausible but NOT synonymous with the correct choice; use everyday, child-friendly phrasing (avoid odd textbook-only fragments).
 5. ${pronRule}`;
 
   const reply = await callSentenceChat(message);
@@ -457,6 +485,8 @@ ${sample.map((c) => `- ${c.word} (${c.pronunciation}) = ${c.meaning} [id:${c.id}
 All words grouped by category (for distractors — see rules below):
 ${wordsByCategory}
 
+${buildStimulusNaturalnessBlock(direction, langLabel)}
+
 Return ONLY a valid JSON object with this exact structure:
 {
   "sentence": "the sentence in ${filterLanguage === "TH" ? "Thai script" : "Japanese (hiragana/katakana/kanji as appropriate)"}",
@@ -488,6 +518,8 @@ ${sample.map((c) => `- ${c.word} (${c.pronunciation}) = ${c.meaning} [id:${c.id}
 
 All words grouped by category (for distractors — see rules below):
 ${wordsByCategory}
+
+${buildStimulusNaturalnessBlock(direction, langLabel)}
 
 Return ONLY a valid JSON object with this exact structure:
 {
