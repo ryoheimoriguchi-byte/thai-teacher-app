@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
+import { speak } from "@/app/lib/tts";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -28,36 +29,6 @@ type WordProgress = {
 };
 
 type ProgressFilter = "all" | "fully-mastered" | "not-fully-mastered";
-
-const speak = (text: string, speechLang: string) => {
-  try {
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = speechLang;
-    utterance.rate = 0.7;
-    utterance.volume = 1.0;
-    utterance.pitch = 1.0;
-    const trySpeak = () => {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        const preferred = voices.find((v) => v.name === "Kyoko") ||
-          voices.find((v) => v.name === "Kanya") ||
-          voices.find((v) => v.name === "Microsoft Pattara - Thai (Thailand)") ||
-          voices.find((v) => v.lang === speechLang) ||
-          voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
-        if (preferred) utterance.voice = preferred;
-      }
-      window.speechSynthesis.speak(utterance);
-    };
-    if (window.speechSynthesis.getVoices().length === 0) {
-      window.speechSynthesis.onvoiceschanged = trySpeak;
-    } else {
-      trySpeak();
-    }
-  } catch (e) {
-    console.error("Speech error:", e);
-  }
-};
 
 export default function WordListPage() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);

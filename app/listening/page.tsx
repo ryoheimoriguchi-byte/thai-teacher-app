@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
+import { speak } from "@/app/lib/tts";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -35,24 +36,6 @@ type WordProgress = {
   consecutive_correct: number;
   mastered: boolean;
   mastered_at?: string;
-};
-
-const speak = (text: string, speechLang: string) => {
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = speechLang;
-  utterance.rate = 0.7;
-  const trySpeak = () => {
-    const voices = window.speechSynthesis.getVoices();
-    const voice = voices.find((v) => v.lang.startsWith(speechLang.split("-")[0]));
-    if (voice) utterance.voice = voice;
-    window.speechSynthesis.speak(utterance);
-  };
-  if (window.speechSynthesis.getVoices().length === 0) {
-    window.speechSynthesis.onvoiceschanged = trySpeak;
-  } else {
-    trySpeak();
-  }
 };
 
 const recordSession = async (userId: string, module: string) => {
