@@ -27,6 +27,12 @@ type Card = {
   language: string;
 };
 
+type JpReadingMeta = {
+  hiraganaIds: string[];
+  katakanaIds: string[];
+  jpWordIds: string[];
+};
+
 const MIN_YEAR = 2026;
 const MIN_MONTH = 4;
 
@@ -36,6 +42,11 @@ export default function Home() {
   const [cards, setCards] = useState<Card[]>([]);
   const [wordProgress, setWordProgress] = useState<WordProgress[]>([]);
   const [studySessions, setStudySessions] = useState<StudySession[]>([]);
+  const [jpReadingMeta, setJpReadingMeta] = useState<JpReadingMeta>({
+    hiraganaIds: [],
+    katakanaIds: [],
+    jpWordIds: [],
+  });
   const [newUserName, setNewUserName] = useState("");
   const [newUserLanguage, setNewUserLanguage] = useState<"TH" | "JP">("TH");
   const [showAddUser, setShowAddUser] = useState(false);
@@ -74,25 +85,40 @@ export default function Home() {
   useEffect(() => {
     if (!currentUser) return;
     const fetchData = async () => {
-      const { data: cardData } = await supabase
-        .from("cards")
-        .select("id, language")
-        .eq("language", currentUser.language)
-        .eq("type", "word");
+      const [{ data: cardData }, { data: progressData }, { data: sessionData }, { data: jpCharCards }, { data: jpWordCards }] =
+        await Promise.all([
+          supabase
+            .from("cards")
+            .select("id, language")
+            .eq("language", currentUser.language)
+            .eq("type", "word"),
+          supabase.from("word_progress").select("*").eq("user_id", currentUser.id),
+          supabase
+            .from("study_sessions")
+            .select("*")
+            .eq("user_id", currentUser.id)
+            .order("studied_date", { ascending: false }),
+          supabase
+            .from("cards")
+            .select("id, character_type")
+            .eq("language", "JP")
+            .eq("type", "character"),
+          supabase.from("cards").select("id").eq("language", "JP").eq("type", "word"),
+        ]);
+
       if (cardData) setCards(cardData);
-
-      const { data: progressData } = await supabase
-        .from("word_progress")
-        .select("*")
-        .eq("user_id", currentUser.id);
       if (progressData) setWordProgress(progressData);
-
-      const { data: sessionData } = await supabase
-        .from("study_sessions")
-        .select("*")
-        .eq("user_id", currentUser.id)
-        .order("studied_date", { ascending: false });
       if (sessionData) setStudySessions(sessionData);
+
+      const hIds =
+        jpCharCards?.filter((c) => c.character_type === "hiragana").map((c) => c.id) ?? [];
+      const kIds =
+        jpCharCards?.filter((c) => c.character_type === "katakana").map((c) => c.id) ?? [];
+      setJpReadingMeta({
+        hiraganaIds: hIds,
+        katakanaIds: kIds,
+        jpWordIds: jpWordCards?.map((c) => c.id) ?? [],
+      });
     };
     fetchData();
   }, [currentUser]);
@@ -111,6 +137,60 @@ export default function Home() {
       p.mastered &&
       p.mastered_at &&
       new Date(p.mastered_at) >= sevenDaysAgo
+    ).length;
+  };
+
+  const cardIdSet = (ids: string[]) => new Set(ids);
+
+  const getReadingCharacterMastered = (ids: string[]) => {
+    const s = cardIdSet(ids);
+    return wordProgress.filter(
+      (p) =>
+        p.module === "reading_character" &&
+        p.direction === "en-to-word" &&
+        p.mastered &&
+        s.has(p.card_id)
+    ).length;
+  };
+
+  const getReadingCharacterWeekly = (ids: string[]) => {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const s = cardIdSet(ids);
+    return wordProgress.filter(
+      (p) =>
+        p.module === "reading_character" &&
+        p.direction === "en-to-word" &&
+        p.mastered &&
+        p.mastered_at &&
+        s.has(p.card_id) &&
+        new Date(p.mastered_at) >= sevenDaysAgo
+    ).length;
+  };
+
+  const getReadingWordMastered = () => {
+    const s = cardIdSet(jpReadingMeta.jpWordIds);
+    return wordProgress.filter(
+      (p) =>
+        p.module === "reading_word" &&
+        p.direction === "en-to-word" &&
+        p.mastered &&
+        s.has(p.card_id)
+    ).length;
+  };
+
+  const getReadingWordWeekly = () => {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const s = cardIdSet(jpReadingMeta.jpWordIds);
+    return wordProgress.filter(
+      (p) =>
+        p.module === "reading_word" &&
+        p.direction === "en-to-word" &&
+        p.mastered &&
+        p.mastered_at &&
+        s.has(p.card_id) &&
+        new Date(p.mastered_at) >= sevenDaysAgo
     ).length;
   };
 
@@ -370,6 +450,47 @@ export default function Home() {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "6px" }}>
               <span style={{ fontSize: "13px", fontWeight: "500" }}>{label}: {dir}</span>
               <span style={{ fontSize: "12px", color: "#4caf50", fontWeight: "500" }}>{mastered} / {totalWords} ✓</span>
+            </div>
+            <div style={{ background: "#ddd", height: "6px", borderRadius: "3px", overflow: "hidden", marginBottom: "6px" }}>
+              <div style={{ background: "#4caf50", width: `${percent}%`, height: "100%", borderRadius: "3px", transition: "width 0.5s" }} />
+            </div>
+            <span style={{ fontSize: "11px", color: motivation.color, fontWeight: "500" }}>
+              {motivation.text}
+            </span>
+          </div>
+        );
+      })}
+
+      {([
+        {
+          key: "reading-hiragana",
+          label: "📖 Reading: Hiragana",
+          mastered: getReadingCharacterMastered(jpReadingMeta.hiraganaIds),
+          total: jpReadingMeta.hiraganaIds.length,
+          weekly: getReadingCharacterWeekly(jpReadingMeta.hiraganaIds),
+        },
+        {
+          key: "reading-katakana",
+          label: "📖 Reading: Katakana",
+          mastered: getReadingCharacterMastered(jpReadingMeta.katakanaIds),
+          total: jpReadingMeta.katakanaIds.length,
+          weekly: getReadingCharacterWeekly(jpReadingMeta.katakanaIds),
+        },
+        {
+          key: "reading-word",
+          label: "📖 Reading: Word",
+          mastered: getReadingWordMastered(),
+          total: jpReadingMeta.jpWordIds.length,
+          weekly: getReadingWordWeekly(),
+        },
+      ]).map(({ key, label, mastered, total, weekly }) => {
+        const motivation = weeklyMotivation(weekly);
+        const percent = total > 0 ? Math.round((mastered / total) * 100) : 0;
+        return (
+          <div key={key} style={{ background: "#f9f9f9", padding: "12px", borderRadius: "8px", marginBottom: "8px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "6px" }}>
+              <span style={{ fontSize: "13px", fontWeight: "500" }}>{label}</span>
+              <span style={{ fontSize: "12px", color: "#4caf50", fontWeight: "500" }}>{mastered} / {total} ✓</span>
             </div>
             <div style={{ background: "#ddd", height: "6px", borderRadius: "3px", overflow: "hidden", marginBottom: "6px" }}>
               <div style={{ background: "#4caf50", width: `${percent}%`, height: "100%", borderRadius: "3px", transition: "width 0.5s" }} />
