@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
-import { speak } from "@/app/lib/tts";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -20,6 +19,7 @@ type Card = {
   breakdown: string;
   type?: string;
   character_type?: string | null;
+  display_order?: number | null;
 };
 
 type WordProgress = {
@@ -42,6 +42,9 @@ type SpeakingResult = {
 /** Character / Word today; add "sentence" later for sentence reading. */
 type ReadingSubMode = "character" | "word";
 type WordMode = "all" | "new-only";
+
+/** Reserved for future shuffle / custom order (UI toggle). Today characters use display_order only. */
+type CharacterSortMode = "gojuon";
 
 const recordSession = async (userId: string, module: string) => {
   const today = new Date().toISOString().split("T")[0];
@@ -97,8 +100,6 @@ const updateWordProgress = async (
   return { consecutive, mastered, masteredAt: masteredAt ?? undefined };
 };
 
-const SPEECH_LANG = "ja-JP";
-
 export default function ReadingPage() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [cards, setCards] = useState<Card[]>([]);
@@ -142,11 +143,15 @@ export default function ReadingPage() {
     if (!currentUser) return;
     const fetchData = async () => {
       const cardType = subMode === "character" ? "character" : "word";
-      const { data: cardData } = await supabase
+      let query = supabase
         .from("cards")
         .select("*")
         .eq("language", "JP")
         .eq("type", cardType);
+      if (cardType === "character") {
+        query = query.order("display_order", { ascending: true });
+      }
+      const { data: cardData } = await query;
       if (cardData) setCards(cardData);
 
       const { data: progressData } = await supabase
@@ -166,10 +171,42 @@ export default function ReadingPage() {
 
   const pickNextCard = useCallback((addToHistory = true) => {
     if (cards.length === 0) return;
-    let pool = cards;
+
+    if (subMode === "word") {
+      let pool = cards;
+      if (wordMode === "new-only") {
+        const filtered = cards.filter((c) => !getProgress(c.id)?.mastered);
+        if (filtered.length === 0) {
+          if (addToHistory && currentCard) {
+            setHistory((prev) => [...prev, currentCard]);
+          }
+          setCurrentCard(null);
+          setResult(null);
+          setShowMastered(false);
+          return;
+        }
+        pool = filtered;
+      }
+
+      if (addToHistory && currentCard) {
+        setHistory((prev) => [...prev, currentCard]);
+      }
+
+      const card = pool[Math.floor(Math.random() * pool.length)];
+      setCurrentCard(card);
+      setResult(null);
+      setShowMastered(false);
+      return;
+    }
+
+    // Character mode: gojuon order via display_order (add shuffle branch when sortMode UI exists)
+    const sorted = [...cards].sort(
+      (a, b) => (a.display_order ?? 1e9) - (b.display_order ?? 1e9)
+    );
+    let pool = sorted;
     if (wordMode === "new-only") {
-      const filtered = cards.filter((c) => !getProgress(c.id)?.mastered);
-      if (filtered.length === 0) {
+      pool = sorted.filter((c) => !getProgress(c.id)?.mastered);
+      if (pool.length === 0) {
         if (addToHistory && currentCard) {
           setHistory((prev) => [...prev, currentCard]);
         }
@@ -178,18 +215,22 @@ export default function ReadingPage() {
         setShowMastered(false);
         return;
       }
-      pool = filtered;
     }
 
     if (addToHistory && currentCard) {
       setHistory((prev) => [...prev, currentCard]);
     }
 
-    const card = pool[Math.floor(Math.random() * pool.length)];
-    setCurrentCard(card);
+    let nextIdx = 0;
+    if (currentCard) {
+      const idx = pool.findIndex((c) => c.id === currentCard.id);
+      if (idx >= 0) nextIdx = (idx + 1) % pool.length;
+    }
+
+    setCurrentCard(pool[nextIdx]);
     setResult(null);
     setShowMastered(false);
-  }, [cards, wordMode, wordProgress, currentCard]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, wordMode, wordProgress, currentCard, subMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const goBack = () => {
     if (history.length === 0) return;
@@ -320,7 +361,6 @@ export default function ReadingPage() {
 
   const targetText = currentCard?.word;
   const targetPron = currentCard?.pronunciation;
-  const targetMeaning = currentCard?.meaning;
 
   const isLoading =
     !allDone && currentCard === null && cards.length > 0;
@@ -435,12 +475,7 @@ export default function ReadingPage() {
               <p style={{ fontSize: "72px", fontWeight: "600", margin: "8px 0", lineHeight: 1.2 }}>{targetText}</p>
             )}
             {subMode === "word" && (
-              <>
-                {targetMeaning ? (
-                  <p style={{ fontSize: "16px", fontWeight: "500", margin: "0 0 4px" }}>{targetMeaning}</p>
-                ) : null}
-                <p style={{ fontSize: "24px", fontWeight: "500", margin: "8px 0 4px" }}>{targetText}</p>
-              </>
+              <p style={{ fontSize: "24px", fontWeight: "500", margin: "8px 0 4px" }}>{targetText}</p>
             )}
             {subMode === "character" && currentCard.category && (
               <p style={{ fontSize: "11px", color: "#aaa", margin: "0 0 12px" }}>{currentCard.category}</p>
@@ -461,25 +496,6 @@ export default function ReadingPage() {
                 />
               ))}
             </div>
-            <button
-              type="button"
-              onClick={() => speak(targetText, SPEECH_LANG)}
-              onTouchEnd={(e) => {
-                e.preventDefault();
-                speak(targetText, SPEECH_LANG);
-              }}
-              style={{
-                padding: "6px 16px",
-                border: "1px solid #4caf50",
-                color: "#4caf50",
-                background: "white",
-                borderRadius: "16px",
-                fontSize: "13px",
-                cursor: "pointer",
-              }}
-            >
-              🔊 Hear example
-            </button>
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "12px" }}>
