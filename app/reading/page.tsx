@@ -43,8 +43,11 @@ type SpeakingResult = {
 type ReadingSubMode = "character" | "word";
 type WordMode = "all" | "new-only";
 
-/** Reserved for future shuffle / custom order (UI toggle). Today characters use display_order only. */
-type CharacterSortMode = "gojuon";
+type CharacterSortMode = "gojuon" | "shuffle";
+
+function shuffleArray<T>(items: T[]): T[] {
+  return [...items].sort(() => Math.random() - 0.5);
+}
 
 const recordSession = async (userId: string, module: string) => {
   const today = new Date().toISOString().split("T")[0];
@@ -106,6 +109,7 @@ export default function ReadingPage() {
   const [wordProgress, setWordProgress] = useState<WordProgress[]>([]);
   const [subMode, setSubMode] = useState<ReadingSubMode>("character");
   const [wordMode, setWordMode] = useState<WordMode>("all");
+  const [sortMode, setSortMode] = useState<CharacterSortMode>("gojuon");
   const [currentCard, setCurrentCard] = useState<Card | null>(null);
   const [history, setHistory] = useState<Card[]>([]);
   const [result, setResult] = useState<SpeakingResult | null>(null);
@@ -115,6 +119,8 @@ export default function ReadingPage() {
   const [score, setScore] = useState({ passed: 0, total: 0 });
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  /** Current shuffled visit order for character + shuffle (reset when sort/filter/cards change). */
+  const shuffleDeckRef = useRef<Card[]>([]);
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -163,6 +169,10 @@ export default function ReadingPage() {
     fetchData();
   }, [currentUser, subMode]);
 
+  useEffect(() => {
+    shuffleDeckRef.current = [];
+  }, [sortMode, wordMode, subMode, cards]);
+
   const moduleKey = subMode === "character" ? "reading_character" : "reading_word";
   const apiMode = subMode === "character" ? "reading-character" : "reading-word";
 
@@ -199,14 +209,13 @@ export default function ReadingPage() {
       return;
     }
 
-    // Character mode: gojuon order via display_order (add shuffle branch when sortMode UI exists)
     const sorted = [...cards].sort(
       (a, b) => (a.display_order ?? 1e9) - (b.display_order ?? 1e9)
     );
-    let pool = sorted;
+    let basePool = sorted;
     if (wordMode === "new-only") {
-      pool = sorted.filter((c) => !getProgress(c.id)?.mastered);
-      if (pool.length === 0) {
+      basePool = sorted.filter((c) => !getProgress(c.id)?.mastered);
+      if (basePool.length === 0) {
         if (addToHistory && currentCard) {
           setHistory((prev) => [...prev, currentCard]);
         }
@@ -217,20 +226,67 @@ export default function ReadingPage() {
       }
     }
 
+    if (sortMode === "gojuon") {
+      if (addToHistory && currentCard) {
+        setHistory((prev) => [...prev, currentCard]);
+      }
+      let nextIdx = 0;
+      if (currentCard) {
+        const idx = basePool.findIndex((c) => c.id === currentCard.id);
+        if (idx >= 0) nextIdx = (idx + 1) % basePool.length;
+      }
+      setCurrentCard(basePool[nextIdx]);
+      setResult(null);
+      setShowMastered(false);
+      return;
+    }
+
+    // shuffle: traverse shuffled deck; at end of cycle reshuffle basePool
     if (addToHistory && currentCard) {
       setHistory((prev) => [...prev, currentCard]);
     }
 
-    let nextIdx = 0;
-    if (currentCard) {
-      const idx = pool.findIndex((c) => c.id === currentCard.id);
-      if (idx >= 0) nextIdx = (idx + 1) % pool.length;
+    const baseIds = new Set(basePool.map((c) => c.id));
+    let deck = shuffleDeckRef.current;
+    let effective = deck.filter((c) => baseIds.has(c.id));
+
+    if (effective.length === 0) {
+      if (basePool.length === 0) {
+        setCurrentCard(null);
+        setResult(null);
+        setShowMastered(false);
+        return;
+      }
+      deck = shuffleArray(basePool);
+      shuffleDeckRef.current = deck;
+      effective = deck.filter((c) => baseIds.has(c.id));
     }
 
-    setCurrentCard(pool[nextIdx]);
+    if (!currentCard) {
+      setCurrentCard(effective[0]);
+      setResult(null);
+      setShowMastered(false);
+      return;
+    }
+
+    const idx = effective.findIndex((c) => c.id === currentCard.id);
+    if (idx === -1) {
+      setCurrentCard(effective[0]);
+      setResult(null);
+      setShowMastered(false);
+      return;
+    }
+
+    if (idx >= effective.length - 1) {
+      deck = shuffleArray(basePool);
+      shuffleDeckRef.current = deck;
+      setCurrentCard(deck[0]);
+    } else {
+      setCurrentCard(effective[idx + 1]);
+    }
     setResult(null);
     setShowMastered(false);
-  }, [cards, wordMode, wordProgress, currentCard, subMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, wordMode, wordProgress, currentCard, subMode, sortMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const goBack = () => {
     if (history.length === 0) return;
@@ -245,7 +301,7 @@ export default function ReadingPage() {
     if (cards.length > 0 && currentUser) {
       pickNextCard(false);
     }
-  }, [cards, subMode, wordMode, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, subMode, wordMode, currentUser, sortMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startRecording = async () => {
     try {
@@ -404,6 +460,33 @@ export default function ReadingPage() {
           </button>
         ))}
       </div>
+
+      {subMode === "character" && (
+        <div style={{ marginBottom: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+          {([
+            { value: "gojuon" as CharacterSortMode, label: "あいうえお順" },
+            { value: "shuffle" as CharacterSortMode, label: "シャッフル" },
+          ]).map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => setSortMode(opt.value)}
+              style={{
+                padding: "6px 14px",
+                borderRadius: "20px",
+                border: sortMode === opt.value ? "2px solid #ff9800" : "1px solid #ccc",
+                background: sortMode === opt.value ? "#fff3e0" : "white",
+                cursor: "pointer",
+                color: "#111",
+                fontWeight: sortMode === opt.value ? "bold" : "normal",
+                fontSize: "13px",
+              }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       <div style={{ marginBottom: "1rem", display: "flex", gap: "8px", flexWrap: "wrap" }}>
         {([
