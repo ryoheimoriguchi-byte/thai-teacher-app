@@ -67,6 +67,7 @@ export default function WordListPage() {
         .from("cards")
         .select("*")
         .eq("language", currentUser.language)
+        .eq("type", "word")
         .order("category");
       if (cardData) setCards(cardData);
 
@@ -153,6 +154,7 @@ export default function WordListPage() {
         <a href="/listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎧 Listening</a>
         <a href="/sentence-listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>💬 Sentence</a>
         <a href="/speaking" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎤 Speaking</a>
+        <a href="/reading" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>📖 Reading</a>
       </div>
 
       <p style={{ fontSize: "13px", color: "#666", marginBottom: "12px" }}>

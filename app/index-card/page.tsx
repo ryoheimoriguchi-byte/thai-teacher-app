@@ -73,6 +73,7 @@ export default function IndexCardPage() {
         .from("cards")
         .select("*")
         .eq("language", currentUser.language)
+        .eq("type", "word")
         .order("created_at");
       if (cardData) setCards(cardData);
 
@@ -142,6 +143,7 @@ export default function IndexCardPage() {
       <a href="/listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎧 Listening</a>
       <a href="/sentence-listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>💬 Sentence</a>
       <a href="/speaking" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎤 Speaking</a>
+      <a href="/reading" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>📖 Reading</a>
     </div>
   );
 

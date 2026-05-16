@@ -77,7 +77,8 @@ export default function Home() {
       const { data: cardData } = await supabase
         .from("cards")
         .select("id, language")
-        .eq("language", currentUser.language);
+        .eq("language", currentUser.language)
+        .eq("type", "word");
       if (cardData) setCards(cardData);
 
       const { data: progressData } = await supabase
@@ -307,6 +308,7 @@ export default function Home() {
         <a href="/listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎧 Listening</a>
         <a href="/sentence-listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>💬 Sentence</a>
         <a href="/speaking" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎤 Speaking</a>
+        <a href="/reading" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>📖 Reading</a>
       </div>
 
       <div style={{ background: "linear-gradient(135deg, #ff6b35, #f7931e)", color: "white", padding: "16px", borderRadius: "12px", marginBottom: "16px", textAlign: "center" }}>

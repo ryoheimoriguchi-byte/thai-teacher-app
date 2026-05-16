@@ -133,7 +133,8 @@ export default function ListeningPage() {
       const { data: cardData } = await supabase
         .from("cards")
         .select("*")
-        .eq("language", currentUser.language);
+        .eq("language", currentUser.language)
+        .eq("type", "word");
       if (cardData) setCards(cardData);
 
       const { data: progressData } = await supabase
@@ -264,6 +265,7 @@ export default function ListeningPage() {
         <a href="/listening" style={{ padding: "6px 14px", background: "#4caf50", color: "white", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎧 Listening</a>
         <a href="/sentence-listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>💬 Sentence</a>
         <a href="/speaking" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎤 Speaking</a>
+        <a href="/reading" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>📖 Reading</a>
       </div>
 
       <div style={{ marginBottom: "8px", display: "flex", gap: "8px" }}>

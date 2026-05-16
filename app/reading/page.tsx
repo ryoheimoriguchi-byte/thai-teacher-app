@@ -18,6 +18,8 @@ type Card = {
   category: string;
   language: string;
   breakdown: string;
+  type?: string;
+  character_type?: string | null;
 };
 
 type WordProgress = {
@@ -37,27 +39,9 @@ type SpeakingResult = {
   tip: string;
 };
 
-type SentenceData = {
-  sentence: string;
-  pronunciation: string;
-  meaning: string;
-  cardIds: string[];
-};
-
-type HistoryItem = {
-  type: "word";
-  card: Card;
-} | {
-  type: "sentence";
-  data: SentenceData;
-};
-
-type Mode = "word" | "sentence";
+/** Character / Word today; add "sentence" later for sentence reading. */
+type ReadingSubMode = "character" | "word";
 type WordMode = "all" | "new-only";
-
-function shuffleArray<T>(items: T[]): T[] {
-  return [...items].sort(() => Math.random() - 0.5);
-}
 
 const recordSession = async (userId: string, module: string) => {
   const today = new Date().toISOString().split("T")[0];
@@ -113,19 +97,19 @@ const updateWordProgress = async (
   return { consecutive, mastered, masteredAt: masteredAt ?? undefined };
 };
 
-export default function SpeakingPage() {
+const SPEECH_LANG = "ja-JP";
+
+export default function ReadingPage() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [cards, setCards] = useState<Card[]>([]);
   const [wordProgress, setWordProgress] = useState<WordProgress[]>([]);
-  const [mode, setMode] = useState<Mode>("word");
+  const [subMode, setSubMode] = useState<ReadingSubMode>("character");
   const [wordMode, setWordMode] = useState<WordMode>("all");
   const [currentCard, setCurrentCard] = useState<Card | null>(null);
-  const [sentenceData, setSentenceData] = useState<SentenceData | null>(null);
-  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [history, setHistory] = useState<Card[]>([]);
   const [result, setResult] = useState<SpeakingResult | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [showMastered, setShowMastered] = useState(false);
   const [score, setScore] = useState({ passed: 0, total: 0 });
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -157,11 +141,12 @@ export default function SpeakingPage() {
   useEffect(() => {
     if (!currentUser) return;
     const fetchData = async () => {
+      const cardType = subMode === "character" ? "character" : "word";
       const { data: cardData } = await supabase
         .from("cards")
         .select("*")
-        .eq("language", currentUser.language)
-        .eq("type", "word");
+        .eq("language", "JP")
+        .eq("type", cardType);
       if (cardData) setCards(cardData);
 
       const { data: progressData } = await supabase
@@ -171,12 +156,10 @@ export default function SpeakingPage() {
       if (progressData) setWordProgress(progressData);
     };
     fetchData();
-  }, [currentUser]);
+  }, [currentUser, subMode]);
 
-  const speechLang = currentUser?.language === "TH" ? "th-TH" : "ja-JP";
-  const langLabel = currentUser?.language === "TH" ? "Thai" : "Japanese";
-  const langFlag = currentUser?.flag ?? "🇹🇭";
-  const moduleKey = mode === "word" ? "speaking-word" : "speaking-sentence";
+  const moduleKey = subMode === "character" ? "reading_character" : "reading_word";
+  const apiMode = subMode === "character" ? "reading-character" : "reading-word";
 
   const getProgress = (cardId: string) =>
     wordProgress.find((p) => p.card_id === cardId && p.module === moduleKey && p.direction === "en-to-word");
@@ -188,7 +171,7 @@ export default function SpeakingPage() {
       const filtered = cards.filter((c) => !getProgress(c.id)?.mastered);
       if (filtered.length === 0) {
         if (addToHistory && currentCard) {
-          setHistory((prev) => [...prev, { type: "word", card: currentCard }]);
+          setHistory((prev) => [...prev, currentCard]);
         }
         setCurrentCard(null);
         setResult(null);
@@ -199,7 +182,7 @@ export default function SpeakingPage() {
     }
 
     if (addToHistory && currentCard) {
-      setHistory((prev) => [...prev, { type: "word", card: currentCard }]);
+      setHistory((prev) => [...prev, currentCard]);
     }
 
     const card = pool[Math.floor(Math.random() * pool.length)];
@@ -208,111 +191,20 @@ export default function SpeakingPage() {
     setShowMastered(false);
   }, [cards, wordMode, wordProgress, currentCard]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const generateSentence = useCallback(async (addToHistory = true) => {
-    if (!currentUser) return;
-
-    let workPool = cards;
-    if (wordMode === "new-only") {
-      const filtered = cards.filter((c) => !getProgress(c.id)?.mastered);
-      if (filtered.length === 0) {
-        if (addToHistory && sentenceData) {
-          setHistory((prev) => [...prev, { type: "sentence", data: sentenceData }]);
-        }
-        setSentenceData(null);
-        setResult(null);
-        setShowMastered(false);
-        setIsGenerating(false);
-        return;
-      }
-      workPool = filtered;
-    }
-
-    if (workPool.length < 3) {
-      alert("Need at least 3 words to generate a sentence.");
-      return;
-    }
-
-    const byCategory = new Map<string, Card[]>();
-    for (const c of workPool) {
-      const key = c.category || "";
-      if (!byCategory.has(key)) byCategory.set(key, []);
-      byCategory.get(key)!.push(c);
-    }
-    const ranked = [...byCategory.entries()].sort((a, b) => b[1].length - a[1].length);
-    const eligible = ranked.filter(([, arr]) => arr.length >= 3);
-    const chosen = eligible.length > 0
-      ? eligible[Math.floor(Math.random() * eligible.length)]
-      : ranked[0];
-    if (!chosen || chosen[1].length < 3) {
-      alert("Need at least 3 words in one category.");
-      return;
-    }
-    const [, categoryPool] = chosen;
-    const categoryLabel = chosen[0] || "(uncategorized)";
-
-    if (addToHistory && sentenceData) {
-      setHistory((prev) => [...prev, { type: "sentence", data: sentenceData }]);
-    }
-
-    setIsGenerating(true);
-    setResult(null);
-    setShowMastered(false);
-    setSentenceData(null);
-
-    const sample = shuffleArray(categoryPool).slice(0, Math.min(10, categoryPool.length));
-    const prompt = `Create a SHORT, simple ${langLabel} sentence using 2-3 of these words.
-All vocabulary is from the SAME category: "${categoryLabel}".
-
-Available words:
-${sample.map((c) => `- ${c.word} (${c.pronunciation}) = ${c.meaning} [id:${c.id}]`).join("\n")}
-
-Return ONLY a valid JSON object:
-{
-  "sentence": "${langLabel} sentence",
-  "pronunciation": "romanized pronunciation",
-  "meaning": "English translation",
-  "cardIds": ["id1", "id2"]
-}
-
-Output ONLY the JSON, no markdown.`;
-
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: prompt }),
-      });
-      const data = await res.json();
-      const cleaned = data.reply.replace(/```json\n?|\n?```/g, "").trim();
-      const parsed = JSON.parse(cleaned);
-      setSentenceData(parsed);
-    } catch (e) {
-      console.error(e);
-      alert("Failed to generate sentence. Please try again.");
-    } finally {
-      setIsGenerating(false);
-    }
-  }, [cards, wordMode, currentUser, langLabel, sentenceData]); // eslint-disable-line react-hooks/exhaustive-deps
-
   const goBack = () => {
     if (history.length === 0) return;
     const prev = history[history.length - 1];
     setHistory((h) => h.slice(0, -1));
     setResult(null);
     setShowMastered(false);
-    if (prev.type === "word") {
-      setCurrentCard(prev.card);
-    } else {
-      setSentenceData(prev.data);
-    }
+    setCurrentCard(prev);
   };
 
   useEffect(() => {
     if (cards.length > 0 && currentUser) {
-      if (mode === "word") pickNextCard(false);
-      else generateSentence(false);
+      pickNextCard(false);
     }
-  }, [cards, mode, wordMode, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, subMode, wordMode, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startRecording = async () => {
     try {
@@ -348,17 +240,20 @@ Output ONLY the JSON, no markdown.`;
   };
 
   const processAudio = async (blob: Blob) => {
-    const targetWord = mode === "word" ? currentCard?.word : sentenceData?.sentence;
-    const targetPron = mode === "word" ? currentCard?.pronunciation : sentenceData?.pronunciation;
+    const targetWord = currentCard?.word;
+    const targetPron = currentCard?.pronunciation;
 
-    if (!targetWord || !currentUser) { setIsProcessing(false); return; }
+    if (!targetWord || !currentUser) {
+      setIsProcessing(false);
+      return;
+    }
 
     const formData = new FormData();
     formData.append("audio", blob, "recording.webm");
     formData.append("targetWord", targetWord);
     formData.append("targetPronunciation", targetPron ?? "");
-    formData.append("language", currentUser.language);
-    formData.append("mode", mode);
+    formData.append("language", "JP");
+    formData.append("mode", apiMode);
 
     try {
       const res = await fetch("/api/speaking", { method: "POST", body: formData });
@@ -368,29 +263,24 @@ Output ONLY the JSON, no markdown.`;
       const isPassed = data.score >= 4;
       setScore((prev) => ({ passed: prev.passed + (isPassed ? 1 : 0), total: prev.total + 1 }));
 
-      const cardIds = mode === "word"
-        ? (currentCard ? [currentCard.id] : [])
-        : (sentenceData?.cardIds ?? []);
-
-      for (const cardId of cardIds) {
-        const currentProgress = getProgress(cardId);
-        const { mastered, masteredAt } = await updateWordProgress(
-          currentUser.id, cardId, moduleKey, "en-to-word", isPassed, currentProgress
-        );
-        const consecutive = isPassed ? (currentProgress?.consecutive_correct ?? 0) + 1 : 0;
-        setWordProgress((prev) => {
-          const existing = prev.find((p) => p.card_id === cardId && p.module === moduleKey && p.direction === "en-to-word");
-          if (existing) {
-            return prev.map((p) =>
-              p.card_id === cardId && p.module === moduleKey && p.direction === "en-to-word"
-                ? { ...p, consecutive_correct: consecutive, mastered, mastered_at: masteredAt }
-                : p
-            );
-          }
-          return [...prev, { card_id: cardId, module: moduleKey, direction: "en-to-word", consecutive_correct: consecutive, mastered, mastered_at: masteredAt }];
-        });
-        if (mastered && !currentProgress?.mastered) setShowMastered(true);
-      }
+      const cardId = currentCard.id;
+      const currentProgress = getProgress(cardId);
+      const { mastered, masteredAt } = await updateWordProgress(
+        currentUser.id, cardId, moduleKey, "en-to-word", isPassed, currentProgress
+      );
+      const consecutive = isPassed ? (currentProgress?.consecutive_correct ?? 0) + 1 : 0;
+      setWordProgress((prev) => {
+        const existing = prev.find((p) => p.card_id === cardId && p.module === moduleKey && p.direction === "en-to-word");
+        if (existing) {
+          return prev.map((p) =>
+            p.card_id === cardId && p.module === moduleKey && p.direction === "en-to-word"
+              ? { ...p, consecutive_correct: consecutive, mastered, mastered_at: masteredAt }
+              : p
+          );
+        }
+        return [...prev, { card_id: cardId, module: moduleKey, direction: "en-to-word", consecutive_correct: consecutive, mastered, mastered_at: masteredAt }];
+      });
+      if (mastered && !currentProgress?.mastered) setShowMastered(true);
 
       await recordSession(currentUser.id, moduleKey);
     } catch (e) {
@@ -401,10 +291,7 @@ Output ONLY the JSON, no markdown.`;
     }
   };
 
-  const handleNext = () => {
-    if (mode === "word") pickNextCard();
-    else generateSentence();
-  };
+  const handleNext = () => pickNextCard();
 
   const getScoreColor = (s: number) => {
     if (s >= 4) return "#28a745";
@@ -426,28 +313,22 @@ Output ONLY the JSON, no markdown.`;
     );
   }
 
-  const allDoneWord =
-    mode === "word" &&
+  const allDone =
     wordMode === "new-only" &&
     cards.length > 0 &&
     cards.every((c) => getProgress(c.id)?.mastered === true);
 
-  const allDoneSentence =
-    mode === "sentence" &&
-    wordMode === "new-only" &&
-    cards.length > 0 &&
-    cards.every((c) => getProgress(c.id)?.mastered === true);
+  const targetText = currentCard?.word;
+  const targetPron = currentCard?.pronunciation;
+  const targetMeaning = currentCard?.meaning;
 
-  const targetText = mode === "word" ? currentCard?.word : sentenceData?.sentence;
-  const targetPron = mode === "word" ? currentCard?.pronunciation : sentenceData?.pronunciation;
-  const targetMeaning = mode === "word" ? currentCard?.meaning : sentenceData?.meaning;
   const isLoading =
-    isGenerating ||
-    (mode === "word" && !allDoneWord && currentCard === null && cards.length > 0);
+    !allDone && currentCard === null && cards.length > 0;
 
   return (
     <main style={{ padding: "2rem", maxWidth: "600px", margin: "0 auto", background: "white", minHeight: "100vh", color: "#111" }}>
-      <h1 style={{ marginBottom: "0.5rem" }}>🎤 Speaking</h1>
+      <h1 style={{ marginBottom: "0.5rem" }}>📖 Reading</h1>
+      <p style={{ fontSize: "13px", color: "#666", marginBottom: "1rem" }}>Japanese only — read the character or word aloud.</p>
 
       <div style={{ display: "flex", gap: "8px", marginBottom: "1rem", flexWrap: "wrap" }}>
         <a href="/" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🏠 Home</a>
@@ -455,29 +336,55 @@ Output ONLY the JSON, no markdown.`;
         <a href="/index-card" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🃏 Index Card</a>
         <a href="/listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎧 Listening</a>
         <a href="/sentence-listening" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>💬 Sentence</a>
-        <a href="/speaking" style={{ padding: "6px 14px", background: "#4caf50", color: "white", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎤 Speaking</a>
-        <a href="/reading" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>📖 Reading</a>
+        <a href="/speaking" style={{ padding: "6px 14px", background: "#eee", color: "#111", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>🎤 Speaking</a>
+        <a href="/reading" style={{ padding: "6px 14px", background: "#4caf50", color: "white", borderRadius: "20px", textDecoration: "none", fontSize: "14px" }}>📖 Reading</a>
       </div>
 
-      <div style={{ marginBottom: "8px", display: "flex", gap: "8px" }}>
+      <div style={{ marginBottom: "8px", display: "flex", gap: "8px", flexWrap: "wrap" }}>
         {([
-          { value: "word" as Mode, label: `${langFlag} Word` },
-          { value: "sentence" as Mode, label: `${langFlag} Sentence` },
+          { value: "character" as ReadingSubMode, label: "Character 文字" },
+          { value: "word" as ReadingSubMode, label: "Word 単語" },
         ]).map((opt) => (
-          <button key={opt.value} onClick={() => setMode(opt.value)}
-            style={{ padding: "6px 14px", borderRadius: "20px", border: mode === opt.value ? "2px solid #4caf50" : "1px solid #ccc", background: mode === opt.value ? "#e8f5e9" : "white", cursor: "pointer", color: "#111", fontWeight: mode === opt.value ? "bold" : "normal", fontSize: "13px" }}>
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => setSubMode(opt.value)}
+            style={{
+              padding: "6px 14px",
+              borderRadius: "20px",
+              border: subMode === opt.value ? "2px solid #4caf50" : "1px solid #ccc",
+              background: subMode === opt.value ? "#e8f5e9" : "white",
+              cursor: "pointer",
+              color: "#111",
+              fontWeight: subMode === opt.value ? "bold" : "normal",
+              fontSize: "13px",
+            }}
+          >
             {opt.label}
           </button>
         ))}
       </div>
 
-      <div style={{ marginBottom: "1rem", display: "flex", gap: "8px" }}>
+      <div style={{ marginBottom: "1rem", display: "flex", gap: "8px", flexWrap: "wrap" }}>
         {([
           { value: "all" as WordMode, label: "All words" },
           { value: "new-only" as WordMode, label: "Not yet mastered" },
         ]).map((opt) => (
-          <button key={opt.value} onClick={() => setWordMode(opt.value)}
-            style={{ padding: "6px 14px", borderRadius: "20px", border: wordMode === opt.value ? "2px solid #2196f3" : "1px solid #ccc", background: wordMode === opt.value ? "#e3f2fd" : "white", cursor: "pointer", color: "#111", fontWeight: wordMode === opt.value ? "bold" : "normal", fontSize: "13px" }}>
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => setWordMode(opt.value)}
+            style={{
+              padding: "6px 14px",
+              borderRadius: "20px",
+              border: wordMode === opt.value ? "2px solid #2196f3" : "1px solid #ccc",
+              background: wordMode === opt.value ? "#e3f2fd" : "white",
+              cursor: "pointer",
+              color: "#111",
+              fontWeight: wordMode === opt.value ? "bold" : "normal",
+              fontSize: "13px",
+            }}
+          >
             {opt.label}
           </button>
         ))}
@@ -492,11 +399,11 @@ Output ONLY the JSON, no markdown.`;
 
       {showMastered && (
         <div style={{ background: "#d4edda", border: "1px solid #28a745", borderRadius: "8px", padding: "12px", marginBottom: "1rem", textAlign: "center" }}>
-          <p style={{ margin: 0, color: "#28a745", fontWeight: "bold" }}>⭐ Word Mastered! 3 times 4/5 or above!</p>
+          <p style={{ margin: 0, color: "#28a745", fontWeight: "bold" }}>⭐ Mastered! 3 times 4/5 or above!</p>
         </div>
       )}
 
-      {(allDoneWord || allDoneSentence) && (
+      {allDone && (
         <div
           style={{
             background: "#e8f5e9",
@@ -509,71 +416,128 @@ Output ONLY the JSON, no markdown.`;
         >
           <p style={{ margin: 0, color: "#2e7d32", fontWeight: "bold", fontSize: "18px" }}>All Done!</p>
           <p style={{ margin: "8px 0 0", color: "#666", fontSize: "14px" }}>
-            Every word is mastered for Speaking · this mode. Switch to &quot;All words&quot; or try another exercise.
+            Everything is mastered for this mode. Switch to &quot;All words&quot; or try another tab.
           </p>
         </div>
       )}
 
       {isLoading && (
-        <p style={{ textAlign: "center", color: "#666" }}>
-          {isGenerating ? "AI is creating a sentence..." : "Loading..."}
-        </p>
+        <p style={{ textAlign: "center", color: "#666" }}>Loading...</p>
       )}
 
-      {!isLoading && targetText && (
+      {!isLoading && targetText && currentCard && (
         <>
-          {/* 問題カード */}
           <div style={{ background: "#f9f9f9", borderRadius: "12px", padding: "20px", textAlign: "center", marginBottom: "16px" }}>
             <p style={{ fontSize: "11px", color: "#aaa", margin: "0 0 6px" }}>
-              Say this {mode === "word" ? "word" : "sentence"} in {langLabel}:
+              {subMode === "character" ? "Read this character in Japanese:" : "Read this word in Japanese:"}
             </p>
-            <p style={{ fontSize: "20px", fontWeight: "500", margin: "0 0 4px" }}>{targetMeaning}</p>
-            {mode === "word" && currentCard?.category && (
+            {subMode === "character" && (
+              <p style={{ fontSize: "72px", fontWeight: "600", margin: "8px 0", lineHeight: 1.2 }}>{targetText}</p>
+            )}
+            {subMode === "word" && (
+              <>
+                {targetMeaning ? (
+                  <p style={{ fontSize: "16px", fontWeight: "500", margin: "0 0 4px" }}>{targetMeaning}</p>
+                ) : null}
+                <p style={{ fontSize: "24px", fontWeight: "500", margin: "8px 0 4px" }}>{targetText}</p>
+              </>
+            )}
+            {subMode === "character" && currentCard.category && (
+              <p style={{ fontSize: "11px", color: "#aaa", margin: "0 0 12px" }}>{currentCard.category}</p>
+            )}
+            {subMode === "word" && currentCard.category && (
               <p style={{ fontSize: "11px", color: "#aaa", margin: "0 0 12px" }}>Category: {currentCard.category}</p>
             )}
-            {mode === "word" && currentCard && (
-              <div style={{ display: "flex", justifyContent: "center", gap: "4px", marginBottom: "12px" }}>
-                {[0,1,2].map((i) => (
-                  <div key={i} style={{ width: "8px", height: "8px", borderRadius: "50%", background: i < (getProgress(currentCard.id)?.consecutive_correct ?? 0) ? "#4caf50" : "#ddd" }} />
-                ))}
-              </div>
-            )}
+            <div style={{ display: "flex", justifyContent: "center", gap: "4px", marginBottom: "12px" }}>
+              {[0, 1, 2].map((i) => (
+                <div
+                  key={i}
+                  style={{
+                    width: "8px",
+                    height: "8px",
+                    borderRadius: "50%",
+                    background: i < (getProgress(currentCard.id)?.consecutive_correct ?? 0) ? "#4caf50" : "#ddd",
+                  }}
+                />
+              ))}
+            </div>
             <button
-              onClick={() => speak(targetText, speechLang)}
-              onTouchEnd={(e) => { e.preventDefault(); speak(targetText, speechLang); }}
-              style={{ padding: "6px 16px", border: "1px solid #4caf50", color: "#4caf50", background: "white", borderRadius: "16px", fontSize: "13px", cursor: "pointer" }}>
+              type="button"
+              onClick={() => speak(targetText, SPEECH_LANG)}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                speak(targetText, SPEECH_LANG);
+              }}
+              style={{
+                padding: "6px 16px",
+                border: "1px solid #4caf50",
+                color: "#4caf50",
+                background: "white",
+                borderRadius: "16px",
+                fontSize: "13px",
+                cursor: "pointer",
+              }}
+            >
               🔊 Hear example
             </button>
           </div>
 
-          {/* Back / Skip */}
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "12px" }}>
             <button
+              type="button"
               onClick={goBack}
               disabled={history.length === 0}
-              style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: "12px", background: "white", color: history.length === 0 ? "#ccc" : "#666", fontSize: "12px", cursor: history.length === 0 ? "default" : "pointer" }}>
+              style={{
+                padding: "4px 12px",
+                border: "1px solid #ccc",
+                borderRadius: "12px",
+                background: "white",
+                color: history.length === 0 ? "#ccc" : "#666",
+                fontSize: "12px",
+                cursor: history.length === 0 ? "default" : "pointer",
+              }}
+            >
               ← Back
             </button>
             <button
+              type="button"
               onClick={handleNext}
-              style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: "12px", background: "white", color: "#999", fontSize: "12px", cursor: "pointer" }}>
+              style={{
+                padding: "4px 12px",
+                border: "1px solid #ccc",
+                borderRadius: "12px",
+                background: "white",
+                color: "#999",
+                fontSize: "12px",
+                cursor: "pointer",
+              }}
+            >
               Skip →
             </button>
           </div>
 
-          {/* 録音ボタン */}
           <div style={{ textAlign: "center", marginBottom: "16px" }}>
             <button
+              type="button"
               onClick={isRecording ? stopRecording : startRecording}
-              onTouchEnd={(e) => { e.preventDefault(); isRecording ? stopRecording() : startRecording(); }}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                isRecording ? stopRecording() : startRecording();
+              }}
               disabled={isProcessing}
               style={{
-                width: "90px", height: "90px", borderRadius: "50%",
+                width: "90px",
+                height: "90px",
+                borderRadius: "50%",
                 background: isRecording ? "#dc3545" : isProcessing ? "#ccc" : "#4caf50",
-                border: "none", color: "white", fontSize: "36px", cursor: isProcessing ? "default" : "pointer",
+                border: "none",
+                color: "white",
+                fontSize: "36px",
+                cursor: isProcessing ? "default" : "pointer",
                 boxShadow: isRecording ? "0 0 0 8px rgba(220,53,69,0.2)" : "none",
                 transition: "all 0.2s",
-              }}>
+              }}
+            >
               {isProcessing ? "⏳" : isRecording ? "⏹" : "🎤"}
             </button>
             <p style={{ fontSize: "12px", color: "#999", margin: "8px 0 0" }}>
@@ -581,7 +545,6 @@ Output ONLY the JSON, no markdown.`;
             </p>
           </div>
 
-          {/* 結果 */}
           {result && (
             <div style={{ background: getScoreBg(result.score), border: `1px solid ${getScoreColor(result.score)}`, borderRadius: "8px", padding: "16px", marginBottom: "12px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
@@ -589,7 +552,7 @@ Output ONLY the JSON, no markdown.`;
                   {result.score}/5 — {result.label}
                 </p>
                 <div style={{ display: "flex", gap: "2px" }}>
-                  {[1,2,3,4,5].map((i) => (
+                  {[1, 2, 3, 4, 5].map((i) => (
                     <span key={i} style={{ fontSize: "14px", opacity: i <= result.score ? 1 : 0.2 }}>⭐</span>
                   ))}
                 </div>
@@ -608,12 +571,30 @@ Output ONLY the JSON, no markdown.`;
           )}
 
           {result && (
-            <button onClick={handleNext}
-              style={{ width: "100%", padding: "12px", background: "#4caf50", color: "white", border: "none", borderRadius: "8px", fontSize: "16px", cursor: "pointer" }}>
+            <button
+              type="button"
+              onClick={handleNext}
+              style={{
+                width: "100%",
+                padding: "12px",
+                background: "#4caf50",
+                color: "white",
+                border: "none",
+                borderRadius: "8px",
+                fontSize: "16px",
+                cursor: "pointer",
+              }}
+            >
               Next →
             </button>
           )}
         </>
+      )}
+
+      {cards.length === 0 && currentUser && !isLoading && (
+        <p style={{ textAlign: "center", color: "#666" }}>
+          No cards for this mode. Apply the database migration and seed, or add JP {subMode === "character" ? "character" : "word"} cards.
+        </p>
       )}
     </main>
   );
