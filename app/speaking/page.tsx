@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
 import { speak } from "@/app/lib/tts";
+import { WordBreakdown, WordBreakdownList } from "@/app/lib/word-breakdown";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -608,10 +609,18 @@ Output ONLY the JSON, no markdown.`;
           )}
 
           {result && (
-            <button onClick={handleNext}
-              style={{ width: "100%", padding: "12px", background: "#4caf50", color: "white", border: "none", borderRadius: "8px", fontSize: "16px", cursor: "pointer" }}>
-              Next →
-            </button>
+            <>
+              {mode === "word" && currentCard && (
+                <WordBreakdown breakdown={currentCard.breakdown} />
+              )}
+              {mode === "sentence" && sentenceData && (
+                <WordBreakdownList cards={cards} cardIds={sentenceData.cardIds} />
+              )}
+              <button onClick={handleNext}
+                style={{ width: "100%", padding: "12px", background: "#4caf50", color: "white", border: "none", borderRadius: "8px", fontSize: "16px", cursor: "pointer" }}>
+                Next →
+              </button>
+            </>
           )}
         </>
       )}

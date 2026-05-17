@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
+import { WordBreakdown } from "@/app/lib/word-breakdown";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -670,22 +671,27 @@ export default function ReadingPage() {
           )}
 
           {result && (
-            <button
-              type="button"
-              onClick={handleNext}
-              style={{
-                width: "100%",
-                padding: "12px",
-                background: "#4caf50",
-                color: "white",
-                border: "none",
-                borderRadius: "8px",
-                fontSize: "16px",
-                cursor: "pointer",
-              }}
-            >
-              Next →
-            </button>
+            <>
+              {subMode === "word" && currentCard && (
+                <WordBreakdown breakdown={currentCard.breakdown} />
+              )}
+              <button
+                type="button"
+                onClick={handleNext}
+                style={{
+                  width: "100%",
+                  padding: "12px",
+                  background: "#4caf50",
+                  color: "white",
+                  border: "none",
+                  borderRadius: "8px",
+                  fontSize: "16px",
+                  cursor: "pointer",
+                }}
+              >
+                Next →
+              </button>
+            </>
           )}
         </>
       )}
