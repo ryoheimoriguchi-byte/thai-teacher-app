@@ -5,6 +5,11 @@ import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
 import { speak } from "@/app/lib/tts";
 import { WordBreakdown, WordBreakdownList } from "@/app/lib/word-breakdown";
+import {
+  checkAndAdvanceStage,
+  getUserStage,
+  STAGE_MODULES,
+} from "@/app/lib/stages";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -19,6 +24,7 @@ type Card = {
   category: string;
   language: string;
   breakdown: string;
+  stage?: number;
 };
 
 type WordProgress = {
@@ -131,6 +137,8 @@ export default function SpeakingPage() {
   const [score, setScore] = useState({ passed: 0, total: 0 });
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const [stageWord, setStageWord] = useState(1);
+  const [stageSentence, setStageSentence] = useState(1);
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -157,12 +165,26 @@ export default function SpeakingPage() {
 
   useEffect(() => {
     if (!currentUser) return;
+    Promise.all([
+      getUserStage(supabase, currentUser.id, currentUser.language, STAGE_MODULES.SPEAKING_WORD),
+      getUserStage(supabase, currentUser.id, currentUser.language, STAGE_MODULES.SPEAKING_SENTENCE),
+    ]).then(([w, s]) => {
+      setStageWord(w);
+      setStageSentence(s);
+    });
+  }, [currentUser]);
+
+  const activeStage = mode === "word" ? stageWord : stageSentence;
+
+  useEffect(() => {
+    if (!currentUser) return;
     const fetchData = async () => {
       const { data: cardData } = await supabase
         .from("cards")
         .select("*")
         .eq("language", currentUser.language)
-        .eq("type", "word");
+        .eq("type", "word")
+        .lte("stage", activeStage);
       if (cardData) setCards(cardData);
 
       const { data: progressData } = await supabase
@@ -172,7 +194,7 @@ export default function SpeakingPage() {
       if (progressData) setWordProgress(progressData);
     };
     fetchData();
-  }, [currentUser]);
+  }, [currentUser, activeStage]);
 
   const speechLang = currentUser?.language === "TH" ? "th-TH" : "ja-JP";
   const langLabel = currentUser?.language === "TH" ? "Thai" : "Japanese";
@@ -394,6 +416,24 @@ Output ONLY the JSON, no markdown.`;
       }
 
       await recordSession(currentUser.id, moduleKey);
+
+      if (isPassed) {
+        const stageModule =
+          mode === "word" ? STAGE_MODULES.SPEAKING_WORD : STAGE_MODULES.SPEAKING_SENTENCE;
+        const advanced = await checkAndAdvanceStage(
+          supabase,
+          currentUser.id,
+          currentUser.language,
+          stageModule,
+          activeStage
+        );
+        if (advanced) {
+          const nextStage = activeStage + 1;
+          if (mode === "word") setStageWord(nextStage);
+          else setStageSentence(nextStage);
+          console.log(`Stage advanced to ${nextStage} for ${stageModule}`);
+        }
+      }
     } catch (e) {
       console.error(e);
       alert("Failed to process audio. Please try again.");

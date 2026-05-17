@@ -18,6 +18,7 @@ type Card = {
   category: string;
   language: string;
   breakdown: string;
+  stage?: number;
 };
 
 type WordProgress = {
@@ -29,6 +30,7 @@ type WordProgress = {
 
 type StudyDirection = "word-to-en" | "en-to-word";
 type ProgressFilter = "all" | "fully-mastered" | "not-fully-mastered";
+type StageFilter = "all" | 1 | 2 | 3;
 
 export default function IndexCardPage() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
@@ -42,6 +44,7 @@ export default function IndexCardPage() {
   const [studyDirection, setStudyDirection] = useState<StudyDirection>("word-to-en");
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [progressFilter, setProgressFilter] = useState<ProgressFilter>("all");
+  const [stageFilter, setStageFilter] = useState<StageFilter>("all");
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -107,11 +110,12 @@ export default function IndexCardPage() {
 
   const filteredCards = cards.filter((card: Card) => {
     const categoryOk = categoryFilter === "all" || card.category === categoryFilter;
+    const stageOk = stageFilter === "all" || (card.stage ?? 1) === stageFilter;
     const count = getMasteredCount(card.id);
     let progressOk = true;
     if (progressFilter === "fully-mastered") progressOk = count === 6;
     else if (progressFilter === "not-fully-mastered") progressOk = count < 6;
-    return categoryOk && progressOk;
+    return categoryOk && stageOk && progressOk;
   });
 
   const startStudy = () => {
@@ -270,6 +274,20 @@ export default function IndexCardPage() {
         ]).map((opt) => (
           <button key={opt.value} onClick={() => setStudyDirection(opt.value)}
             style={{ padding: "6px 14px", borderRadius: "20px", border: studyDirection === opt.value ? "2px solid #4caf50" : "1px solid #ccc", background: studyDirection === opt.value ? "#e8f5e9" : "white", cursor: "pointer", color: "#111", fontWeight: studyDirection === opt.value ? "bold" : "normal", fontSize: "13px" }}>
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ marginBottom: "8px", display: "flex", gap: "6px", flexWrap: "wrap" }}>
+        {([
+          { value: "all" as StageFilter, label: "All stages" },
+          { value: 1 as StageFilter, label: "Stage 1" },
+          { value: 2 as StageFilter, label: "Stage 2" },
+          { value: 3 as StageFilter, label: "Stage 3" },
+        ]).map((opt) => (
+          <button key={String(opt.value)} onClick={() => setStageFilter(opt.value)}
+            style={{ padding: "4px 10px", borderRadius: "12px", border: stageFilter === opt.value ? "2px solid #ff9800" : "1px solid #ccc", background: stageFilter === opt.value ? "#fff3e0" : "white", cursor: "pointer", color: "#111", fontSize: "12px" }}>
             {opt.label}
           </button>
         ))}

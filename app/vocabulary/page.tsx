@@ -18,6 +18,7 @@ type Card = {
   category: string;
   language: string;
   breakdown: string;
+  stage?: number;
 };
 
 type WordProgress = {
@@ -29,6 +30,7 @@ type WordProgress = {
 };
 
 type ProgressFilter = "all" | "fully-mastered" | "not-fully-mastered";
+type StageFilter = "all" | 1 | 2 | 3;
 
 export default function WordListPage() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
@@ -36,6 +38,7 @@ export default function WordListPage() {
   const [wordProgress, setWordProgress] = useState<WordProgress[]>([]);
   const [progressFilter, setProgressFilter] = useState<ProgressFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [stageFilter, setStageFilter] = useState<StageFilter>("all");
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -109,11 +112,12 @@ export default function WordListPage() {
 
   const filteredCards = cards.filter((card) => {
     const categoryOk = categoryFilter === "all" || card.category === categoryFilter;
+    const stageOk = stageFilter === "all" || (card.stage ?? 1) === stageFilter;
     const count = getMasteredCount(card.id);
     let progressOk = true;
     if (progressFilter === "fully-mastered") progressOk = count === 6;
     else if (progressFilter === "not-fully-mastered") progressOk = count < 6;
-    return categoryOk && progressOk;
+    return categoryOk && stageOk && progressOk;
   });
 
   const badges = [
@@ -160,6 +164,21 @@ export default function WordListPage() {
       <p style={{ fontSize: "13px", color: "#666", marginBottom: "12px" }}>
         {filteredCards.length} words · {cards.filter((c) => isFullyMastered(c.id)).length} / {cards.length} fully mastered ⭐
       </p>
+
+      {/* Stage フィルター */}
+      <div style={{ marginBottom: "8px", display: "flex", gap: "6px", flexWrap: "wrap" }}>
+        {([
+          { value: "all" as StageFilter, label: "All stages" },
+          { value: 1 as StageFilter, label: "Stage 1" },
+          { value: 2 as StageFilter, label: "Stage 2" },
+          { value: 3 as StageFilter, label: "Stage 3" },
+        ]).map((opt) => (
+          <button key={String(opt.value)} onClick={() => setStageFilter(opt.value)}
+            style={{ padding: "4px 10px", borderRadius: "12px", border: stageFilter === opt.value ? "2px solid #ff9800" : "1px solid #ccc", background: stageFilter === opt.value ? "#fff3e0" : "white", cursor: "pointer", color: "#111", fontSize: "12px" }}>
+            {opt.label}
+          </button>
+        ))}
+      </div>
 
       {/* カテゴリーフィルター */}
       <div style={{ marginBottom: "8px", display: "flex", gap: "6px", flexWrap: "wrap" }}>

@@ -4,6 +4,11 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
 import { WordBreakdown } from "@/app/lib/word-breakdown";
+import {
+  checkAndAdvanceStage,
+  getUserStage,
+  STAGE_MODULES,
+} from "@/app/lib/stages";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -21,6 +26,7 @@ type Card = {
   type?: string;
   character_type?: string | null;
   display_order?: number | null;
+  stage?: number;
 };
 
 type WordProgress = {
@@ -122,6 +128,8 @@ export default function ReadingPage() {
   const chunksRef = useRef<Blob[]>([]);
   /** Current shuffled visit order for character + shuffle (reset when sort/filter/cards change). */
   const shuffleDeckRef = useRef<Card[]>([]);
+  const [stageWord, setStageWord] = useState(1);
+  const [stageCharacter, setStageCharacter] = useState(1);
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -148,18 +156,38 @@ export default function ReadingPage() {
 
   useEffect(() => {
     if (!currentUser) return;
+    Promise.all([
+      getUserStage(supabase, currentUser.id, "JP", STAGE_MODULES.READING_WORD),
+      getUserStage(supabase, currentUser.id, "JP", STAGE_MODULES.READING_CHARACTER),
+    ]).then(([w, c]) => {
+      setStageWord(w);
+      setStageCharacter(c);
+    });
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser) return;
     const fetchData = async () => {
-      const cardType = subMode === "character" ? "character" : "word";
-      let query = supabase
-        .from("cards")
-        .select("*")
-        .eq("language", "JP")
-        .eq("type", cardType);
-      if (cardType === "character") {
-        query = query.order("display_order", { ascending: true });
+      if (subMode === "character") {
+        const characterTypes =
+          stageCharacter >= 2 ? ["hiragana", "katakana"] : ["hiragana"];
+        const { data: cardData } = await supabase
+          .from("cards")
+          .select("*")
+          .eq("language", "JP")
+          .eq("type", "character")
+          .in("character_type", characterTypes)
+          .order("display_order", { ascending: true });
+        if (cardData) setCards(cardData);
+      } else {
+        const { data: cardData } = await supabase
+          .from("cards")
+          .select("*")
+          .eq("language", "JP")
+          .eq("type", "word")
+          .lte("stage", stageWord);
+        if (cardData) setCards(cardData);
       }
-      const { data: cardData } = await query;
-      if (cardData) setCards(cardData);
 
       const { data: progressData } = await supabase
         .from("word_progress")
@@ -168,7 +196,7 @@ export default function ReadingPage() {
       if (progressData) setWordProgress(progressData);
     };
     fetchData();
-  }, [currentUser, subMode]);
+  }, [currentUser, subMode, stageWord, stageCharacter]);
 
   useEffect(() => {
     shuffleDeckRef.current = [];
@@ -381,6 +409,27 @@ export default function ReadingPage() {
       if (mastered && !currentProgress?.mastered) setShowMastered(true);
 
       await recordSession(currentUser.id, moduleKey);
+
+      if (isPassed) {
+        const stageModule =
+          subMode === "character"
+            ? STAGE_MODULES.READING_CHARACTER
+            : STAGE_MODULES.READING_WORD;
+        const activeStage = subMode === "character" ? stageCharacter : stageWord;
+        const advanced = await checkAndAdvanceStage(
+          supabase,
+          currentUser.id,
+          "JP",
+          stageModule,
+          activeStage
+        );
+        if (advanced) {
+          const nextStage = activeStage + 1;
+          if (subMode === "character") setStageCharacter(nextStage);
+          else setStageWord(nextStage);
+          console.log(`Stage advanced to ${nextStage} for ${stageModule}`);
+        }
+      }
     } catch (e) {
       console.error(e);
       alert("Failed to process audio. Please try again.");

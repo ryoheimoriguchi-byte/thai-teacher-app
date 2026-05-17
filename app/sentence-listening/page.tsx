@@ -5,6 +5,11 @@ import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
 import { speak } from "@/app/lib/tts";
 import { WordBreakdownList } from "@/app/lib/word-breakdown";
+import {
+  checkAndAdvanceStage,
+  getUserStage,
+  STAGE_MODULES,
+} from "@/app/lib/stages";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -19,6 +24,7 @@ type Card = {
   category: string;
   language: string;
   breakdown: string;
+  stage?: number;
 };
 
 type SentenceQuestion = {
@@ -365,6 +371,7 @@ export default function SentenceListeningPage() {
   const [score, setScore] = useState({ correct: 0, total: 0 });
   const [loading, setLoading] = useState(false);
   const [showMastered, setShowMastered] = useState<string[]>([]);
+  const [currentStage, setCurrentStage] = useState(1);
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -391,12 +398,23 @@ export default function SentenceListeningPage() {
 
   useEffect(() => {
     if (!currentUser) return;
+    getUserStage(
+      supabase,
+      currentUser.id,
+      filterLanguage,
+      STAGE_MODULES.SENTENCE
+    ).then(setCurrentStage);
+  }, [currentUser, filterLanguage]);
+
+  useEffect(() => {
+    if (!currentUser) return;
     const fetchData = async () => {
       const { data: cardData } = await supabase
         .from("cards")
         .select("*")
-        .eq("language", currentUser.language)
-        .eq("type", "word");
+        .eq("language", filterLanguage)
+        .eq("type", "word")
+        .lte("stage", currentStage);
       if (cardData) setCards(cardData);
 
       const { data: progressData } = await supabase
@@ -407,7 +425,7 @@ export default function SentenceListeningPage() {
       if (progressData) setWordProgress(progressData);
     };
     fetchData();
-  }, [currentUser]);
+  }, [currentUser, filterLanguage, currentStage]);
 
   useEffect(() => {
     if (currentUser) setFilterLanguage(currentUser.language);
@@ -718,6 +736,21 @@ Output ONLY the JSON, no markdown, no explanation`;
     }
     if (newlyMastered.length > 0) setShowMastered(newlyMastered);
     await recordSession(currentUser.id, "sentence");
+
+    if (isCorrect) {
+      const advanced = await checkAndAdvanceStage(
+        supabase,
+        currentUser.id,
+        filterLanguage,
+        STAGE_MODULES.SENTENCE,
+        currentStage
+      );
+      if (advanced) {
+        const nextStage = currentStage + 1;
+        setCurrentStage(nextStage);
+        console.log(`Stage advanced to ${nextStage} for ${STAGE_MODULES.SENTENCE}`);
+      }
+    }
   };
 
   if (!currentUser) {

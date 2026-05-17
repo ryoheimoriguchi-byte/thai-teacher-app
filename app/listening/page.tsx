@@ -5,6 +5,11 @@ import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
 import { speak } from "@/app/lib/tts";
 import { WordBreakdown } from "@/app/lib/word-breakdown";
+import {
+  checkAndAdvanceStage,
+  getUserStage,
+  STAGE_MODULES,
+} from "@/app/lib/stages";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -19,6 +24,7 @@ type Card = {
   category: string;
   language: string;
   breakdown: string;
+  stage?: number;
 };
 
 type Question = {
@@ -104,6 +110,7 @@ export default function ListeningPage() {
   const [selectedAnswer, setSelectedAnswer] = useState<Card | null>(null);
   const [score, setScore] = useState({ correct: 0, total: 0 });
   const [showMastered, setShowMastered] = useState(false);
+  const [currentStage, setCurrentStage] = useState(1);
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -130,12 +137,23 @@ export default function ListeningPage() {
 
   useEffect(() => {
     if (!currentUser) return;
+    getUserStage(
+      supabase,
+      currentUser.id,
+      currentUser.language,
+      STAGE_MODULES.LISTENING
+    ).then(setCurrentStage);
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser) return;
     const fetchData = async () => {
       const { data: cardData } = await supabase
         .from("cards")
         .select("*")
         .eq("language", currentUser.language)
-        .eq("type", "word");
+        .eq("type", "word")
+        .lte("stage", currentStage);
       if (cardData) setCards(cardData);
 
       const { data: progressData } = await supabase
@@ -146,7 +164,7 @@ export default function ListeningPage() {
       if (progressData) setWordProgress(progressData);
     };
     fetchData();
-  }, [currentUser]);
+  }, [currentUser, currentStage]);
 
   const speechLang = currentUser?.language === "TH" ? "th-TH" : "ja-JP";
   const langFlag = currentUser?.flag ?? "🇹🇭";
@@ -245,6 +263,21 @@ export default function ListeningPage() {
     });
 
     if (mastered && !currentProgress?.mastered) setShowMastered(true);
+
+    if (isCorrect) {
+      const advanced = await checkAndAdvanceStage(
+        supabase,
+        currentUser.id,
+        currentUser.language,
+        STAGE_MODULES.LISTENING,
+        currentStage
+      );
+      if (advanced) {
+        const nextStage = currentStage + 1;
+        setCurrentStage(nextStage);
+        console.log(`Stage advanced to ${nextStage} for ${STAGE_MODULES.LISTENING}`);
+      }
+    }
   };
 
   if (!currentUser) {
