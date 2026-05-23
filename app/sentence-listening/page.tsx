@@ -10,6 +10,7 @@ import {
   getUserStage,
   STAGE_MODULES,
 } from "@/app/lib/stages";
+import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -372,6 +373,11 @@ export default function SentenceListeningPage() {
   const [loading, setLoading] = useState(false);
   const [showMastered, setShowMastered] = useState<string[]>([]);
   const [currentStage, setCurrentStage] = useState(1);
+  const [celebration, setCelebration] = useState<{
+    newStage: number;
+    moduleName: string;
+    masteredCount: number;
+  } | null>(null);
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -738,17 +744,20 @@ Output ONLY the JSON, no markdown, no explanation`;
     await recordSession(currentUser.id, "sentence");
 
     if (isCorrect) {
-      const advanced = await checkAndAdvanceStage(
+      const result = await checkAndAdvanceStage(
         supabase,
         currentUser.id,
         filterLanguage,
         STAGE_MODULES.SENTENCE,
         currentStage
       );
-      if (advanced) {
-        const nextStage = currentStage + 1;
-        setCurrentStage(nextStage);
-        console.log(`Stage advanced to ${nextStage} for ${STAGE_MODULES.SENTENCE}`);
+      if (result.advanced) {
+        setCurrentStage(result.newStage);
+        setCelebration({
+          newStage: result.newStage,
+          moduleName: STAGE_MODULES.SENTENCE,
+          masteredCount: result.masteredCount,
+        });
       }
     }
   };
@@ -924,6 +933,14 @@ Output ONLY the JSON, no markdown, no explanation`;
           )}
         </>
       )}
+
+      <StageUpCelebration
+        open={celebration !== null}
+        newStage={celebration?.newStage ?? 1}
+        moduleName={celebration?.moduleName ?? STAGE_MODULES.SENTENCE}
+        masteredCount={celebration?.masteredCount ?? 0}
+        onClose={() => setCelebration(null)}
+      />
     </main>
   );
 }

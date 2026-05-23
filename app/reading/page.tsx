@@ -9,6 +9,7 @@ import {
   getUserStage,
   STAGE_MODULES,
 } from "@/app/lib/stages";
+import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -130,6 +131,11 @@ export default function ReadingPage() {
   const shuffleDeckRef = useRef<Card[]>([]);
   const [stageWord, setStageWord] = useState(1);
   const [stageCharacter, setStageCharacter] = useState(1);
+  const [celebration, setCelebration] = useState<{
+    newStage: number;
+    moduleName: string;
+    masteredCount: number;
+  } | null>(null);
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -416,18 +422,21 @@ export default function ReadingPage() {
             ? STAGE_MODULES.READING_CHARACTER
             : STAGE_MODULES.READING_WORD;
         const activeStage = subMode === "character" ? stageCharacter : stageWord;
-        const advanced = await checkAndAdvanceStage(
+        const result = await checkAndAdvanceStage(
           supabase,
           currentUser.id,
           "JP",
           stageModule,
           activeStage
         );
-        if (advanced) {
-          const nextStage = activeStage + 1;
-          if (subMode === "character") setStageCharacter(nextStage);
-          else setStageWord(nextStage);
-          console.log(`Stage advanced to ${nextStage} for ${stageModule}`);
+        if (result.advanced) {
+          if (subMode === "character") setStageCharacter(result.newStage);
+          else setStageWord(result.newStage);
+          setCelebration({
+            newStage: result.newStage,
+            moduleName: stageModule,
+            masteredCount: result.masteredCount,
+          });
         }
       }
     } catch (e) {
@@ -750,6 +759,14 @@ export default function ReadingPage() {
           No cards for this mode. Apply the database migration and seed, or add JP {subMode === "character" ? "character" : "word"} cards.
         </p>
       )}
+
+      <StageUpCelebration
+        open={celebration !== null}
+        newStage={celebration?.newStage ?? 1}
+        moduleName={celebration?.moduleName ?? STAGE_MODULES.READING_WORD}
+        masteredCount={celebration?.masteredCount ?? 0}
+        onClose={() => setCelebration(null)}
+      />
     </main>
   );
 }

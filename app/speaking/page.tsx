@@ -10,6 +10,7 @@ import {
   getUserStage,
   STAGE_MODULES,
 } from "@/app/lib/stages";
+import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -139,6 +140,11 @@ export default function SpeakingPage() {
   const chunksRef = useRef<Blob[]>([]);
   const [stageWord, setStageWord] = useState(1);
   const [stageSentence, setStageSentence] = useState(1);
+  const [celebration, setCelebration] = useState<{
+    newStage: number;
+    moduleName: string;
+    masteredCount: number;
+  } | null>(null);
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -420,18 +426,21 @@ Output ONLY the JSON, no markdown.`;
       if (isPassed) {
         const stageModule =
           mode === "word" ? STAGE_MODULES.SPEAKING_WORD : STAGE_MODULES.SPEAKING_SENTENCE;
-        const advanced = await checkAndAdvanceStage(
+        const result = await checkAndAdvanceStage(
           supabase,
           currentUser.id,
           currentUser.language,
           stageModule,
           activeStage
         );
-        if (advanced) {
-          const nextStage = activeStage + 1;
-          if (mode === "word") setStageWord(nextStage);
-          else setStageSentence(nextStage);
-          console.log(`Stage advanced to ${nextStage} for ${stageModule}`);
+        if (result.advanced) {
+          if (mode === "word") setStageWord(result.newStage);
+          else setStageSentence(result.newStage);
+          setCelebration({
+            newStage: result.newStage,
+            moduleName: stageModule,
+            masteredCount: result.masteredCount,
+          });
         }
       }
     } catch (e) {
@@ -664,6 +673,14 @@ Output ONLY the JSON, no markdown.`;
           )}
         </>
       )}
+
+      <StageUpCelebration
+        open={celebration !== null}
+        newStage={celebration?.newStage ?? 1}
+        moduleName={celebration?.moduleName ?? STAGE_MODULES.SPEAKING_WORD}
+        masteredCount={celebration?.masteredCount ?? 0}
+        onClose={() => setCelebration(null)}
+      />
     </main>
   );
 }

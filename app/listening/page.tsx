@@ -10,6 +10,7 @@ import {
   getUserStage,
   STAGE_MODULES,
 } from "@/app/lib/stages";
+import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -111,6 +112,11 @@ export default function ListeningPage() {
   const [score, setScore] = useState({ correct: 0, total: 0 });
   const [showMastered, setShowMastered] = useState(false);
   const [currentStage, setCurrentStage] = useState(1);
+  const [celebration, setCelebration] = useState<{
+    newStage: number;
+    moduleName: string;
+    masteredCount: number;
+  } | null>(null);
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -265,17 +271,20 @@ export default function ListeningPage() {
     if (mastered && !currentProgress?.mastered) setShowMastered(true);
 
     if (isCorrect) {
-      const advanced = await checkAndAdvanceStage(
+      const result = await checkAndAdvanceStage(
         supabase,
         currentUser.id,
         currentUser.language,
         STAGE_MODULES.LISTENING,
         currentStage
       );
-      if (advanced) {
-        const nextStage = currentStage + 1;
-        setCurrentStage(nextStage);
-        console.log(`Stage advanced to ${nextStage} for ${STAGE_MODULES.LISTENING}`);
+      if (result.advanced) {
+        setCurrentStage(result.newStage);
+        setCelebration({
+          newStage: result.newStage,
+          moduleName: STAGE_MODULES.LISTENING,
+          masteredCount: result.masteredCount,
+        });
       }
     }
   };
@@ -453,6 +462,14 @@ export default function ListeningPage() {
           )}
         </>
       )}
+
+      <StageUpCelebration
+        open={celebration !== null}
+        newStage={celebration?.newStage ?? 1}
+        moduleName={celebration?.moduleName ?? STAGE_MODULES.LISTENING}
+        masteredCount={celebration?.masteredCount ?? 0}
+        onClose={() => setCelebration(null)}
+      />
     </main>
   );
 }

@@ -11,6 +11,12 @@ export const STAGE_MODULES = {
 
 export type StageModule = (typeof STAGE_MODULES)[keyof typeof STAGE_MODULES];
 
+export type StageAdvanceResult = {
+  advanced: boolean;
+  masteredCount: number;
+  newStage: number;
+};
+
 const EN_TO_WORD_ONLY_MODULES: StageModule[] = [
   STAGE_MODULES.SPEAKING_WORD,
   STAGE_MODULES.READING_WORD,
@@ -38,12 +44,14 @@ export async function checkAndAdvanceStage(
   language: string,
   module: StageModule,
   currentStage: number
-): Promise<boolean> {
+): Promise<StageAdvanceResult> {
   let cardIds: string[];
   let totalCount: number;
 
   if (module === STAGE_MODULES.READING_CHARACTER) {
-    if (language !== "JP") return false;
+    if (language !== "JP") {
+      return { advanced: false, masteredCount: 0, newStage: currentStage };
+    }
     const characterType = currentStage === 1 ? "hiragana" : "katakana";
     const { data: cards } = await supabase
       .from("cards")
@@ -51,7 +59,9 @@ export async function checkAndAdvanceStage(
       .eq("language", "JP")
       .eq("type", "character")
       .eq("character_type", characterType);
-    if (!cards || cards.length === 0) return false;
+    if (!cards || cards.length === 0) {
+      return { advanced: false, masteredCount: 0, newStage: currentStage };
+    }
     totalCount = cards.length;
     cardIds = cards.map((c) => c.id);
   } else {
@@ -61,7 +71,9 @@ export async function checkAndAdvanceStage(
       .eq("language", language)
       .eq("type", "word")
       .eq("stage", currentStage);
-    if (!cards || cards.length === 0) return false;
+    if (!cards || cards.length === 0) {
+      return { advanced: false, masteredCount: 0, newStage: currentStage };
+    }
     totalCount = cards.length;
     cardIds = cards.map((c) => c.id);
   }
@@ -104,7 +116,9 @@ export async function checkAndAdvanceStage(
   }
 
   const masteredRate = masteredCount / totalCount;
-  if (masteredRate < 0.9) return false;
+  if (masteredRate < 0.9) {
+    return { advanced: false, masteredCount, newStage: currentStage };
+  }
 
   const nextStage = currentStage + 1;
   await supabase
@@ -114,5 +128,5 @@ export async function checkAndAdvanceStage(
     .eq("language", language)
     .eq("module", module);
 
-  return true;
+  return { advanced: true, masteredCount, newStage: nextStage };
 }
