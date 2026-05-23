@@ -11,6 +11,7 @@ import {
   STAGE_MODULES,
 } from "@/app/lib/stages";
 import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
+import { checkAndAwardBadges } from "@/app/lib/badges";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -758,6 +759,29 @@ Output ONLY the JSON, no markdown, no explanation`;
           moduleName: STAGE_MODULES.SENTENCE,
           masteredCount: result.masteredCount,
         });
+      }
+
+      const usedCards = (question.usedCardIds ?? [])
+        .map((id) => cards.find((c) => c.id === id))
+        .filter((c): c is Card => !!c);
+      const categories = [
+        ...new Set(usedCards.map((c) => c.category).filter(Boolean)),
+      ];
+      for (const cat of categories) {
+        try {
+          const newBadges = await checkAndAwardBadges(
+            supabase,
+            currentUser.id,
+            filterLanguage,
+            STAGE_MODULES.SENTENCE,
+            cat
+          );
+          if (newBadges.length > 0) {
+            console.log("New badges (sentence):", newBadges);
+          }
+        } catch (e) {
+          console.error("checkAndAwardBadges error:", e);
+        }
       }
     }
   };

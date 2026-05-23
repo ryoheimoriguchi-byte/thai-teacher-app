@@ -11,6 +11,7 @@ import {
   STAGE_MODULES,
 } from "@/app/lib/stages";
 import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
+import { checkAndAwardBadges } from "@/app/lib/badges";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -441,6 +442,47 @@ Output ONLY the JSON, no markdown.`;
             moduleName: stageModule,
             masteredCount: result.masteredCount,
           });
+        }
+
+        if (mode === "word" && currentCard?.category) {
+          try {
+            const newBadges = await checkAndAwardBadges(
+              supabase,
+              currentUser.id,
+              currentUser.language,
+              STAGE_MODULES.SPEAKING_WORD,
+              currentCard.category
+            );
+            if (newBadges.length > 0) {
+              console.log("New badges:", newBadges);
+            }
+          } catch (e) {
+            console.error("checkAndAwardBadges error:", e);
+          }
+        } else if (mode === "sentence" && sentenceData?.cardIds) {
+          const categories = [
+            ...new Set(
+              sentenceData.cardIds
+                .map((id) => cards.find((c) => c.id === id)?.category)
+                .filter((c): c is string => !!c)
+            ),
+          ];
+          for (const cat of categories) {
+            try {
+              const newBadges = await checkAndAwardBadges(
+                supabase,
+                currentUser.id,
+                currentUser.language,
+                STAGE_MODULES.SPEAKING_SENTENCE,
+                cat
+              );
+              if (newBadges.length > 0) {
+                console.log("New badges (speaking-sentence):", newBadges);
+              }
+            } catch (e) {
+              console.error("checkAndAwardBadges error:", e);
+            }
+          }
         }
       }
     } catch (e) {

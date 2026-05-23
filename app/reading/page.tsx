@@ -10,6 +10,7 @@ import {
   STAGE_MODULES,
 } from "@/app/lib/stages";
 import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
+import { checkAndAwardBadges } from "@/app/lib/badges";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -437,6 +438,23 @@ export default function ReadingPage() {
             moduleName: stageModule,
             masteredCount: result.masteredCount,
           });
+        }
+
+        if (subMode === "word" && currentCard?.category) {
+          try {
+            const newBadges = await checkAndAwardBadges(
+              supabase,
+              currentUser.id,
+              currentUser.language,
+              STAGE_MODULES.READING_WORD,
+              currentCard.category
+            );
+            if (newBadges.length > 0) {
+              console.log("New badges:", newBadges);
+            }
+          } catch (e) {
+            console.error("checkAndAwardBadges error:", e);
+          }
         }
       }
     } catch (e) {
