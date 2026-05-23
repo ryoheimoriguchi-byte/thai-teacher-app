@@ -3,6 +3,13 @@
 import { useState, useEffect } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "./lib/users";
+import {
+  countMasteredInStage,
+  fetchHomeStageData,
+  getStageCellDisplay,
+  HOME_STAGE_ROWS,
+  STAGE_COLUMN_NUMBERS,
+} from "./lib/stage-progress";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -50,6 +57,10 @@ export default function Home() {
   const [newUserName, setNewUserName] = useState("");
   const [newUserLanguage, setNewUserLanguage] = useState<"TH" | "JP">("TH");
   const [showAddUser, setShowAddUser] = useState(false);
+  const [stageHome, setStageHome] = useState<{
+    currentByModule: Record<string, number>;
+    cardsByStage: Map<number, string[]>;
+  } | null>(null);
 
   const today = new Date();
   const [calendarYear, setCalendarYear] = useState(today.getFullYear());
@@ -121,6 +132,16 @@ export default function Home() {
       });
     };
     fetchData();
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!currentUser || currentUser.language !== "JP") {
+      setStageHome(null);
+      return;
+    }
+    fetchHomeStageData(supabase, currentUser.id)
+      .then(setStageHome)
+      .catch(() => setStageHome(null));
   }, [currentUser]);
 
   const totalWords = cards.length;
@@ -501,6 +522,119 @@ export default function Home() {
           </div>
         );
       })}
+
+      {currentUser.language === "JP" && stageHome && (
+        <>
+          <h3 style={{ fontSize: "14px", margin: "16px 0 10px" }}>Stage</h3>
+          <div
+            style={{
+              overflowX: "auto",
+              marginBottom: "8px",
+              border: "1px solid #eee",
+              borderRadius: "8px",
+            }}
+          >
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                fontSize: "11px",
+                minWidth: "320px",
+              }}
+            >
+              <thead>
+                <tr style={{ background: "#f5f5f5" }}>
+                  <th
+                    style={{
+                      textAlign: "left",
+                      padding: "8px 6px",
+                      fontWeight: 600,
+                      position: "sticky",
+                      left: 0,
+                      background: "#f5f5f5",
+                    }}
+                  >
+                    Module
+                  </th>
+                  {STAGE_COLUMN_NUMBERS.map((n) => (
+                    <th
+                      key={n}
+                      style={{
+                        padding: "8px 4px",
+                        fontWeight: 600,
+                        textAlign: "center",
+                        minWidth: "44px",
+                      }}
+                    >
+                      S{n}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {HOME_STAGE_ROWS.map(({ label, module }) => {
+                  const currentStage = stageHome.currentByModule[module] ?? 1;
+                  return (
+                    <tr key={module} style={{ borderTop: "1px solid #eee" }}>
+                      <td
+                        style={{
+                          padding: "8px 6px",
+                          fontWeight: 500,
+                          position: "sticky",
+                          left: 0,
+                          background: "white",
+                        }}
+                      >
+                        {label}
+                      </td>
+                      {STAGE_COLUMN_NUMBERS.map((stageNum) => {
+                        const cardIds =
+                          stageHome.cardsByStage.get(stageNum) ?? [];
+                        const mastered = countMasteredInStage(
+                          module,
+                          cardIds,
+                          wordProgress
+                        );
+                        const cell = getStageCellDisplay(
+                          stageNum,
+                          currentStage,
+                          mastered,
+                          cardIds.length
+                        );
+                        let text = "🔒";
+                        let color = "#bbb";
+                        if (cell.kind === "done") {
+                          text = "✓";
+                          color = "#4caf50";
+                        } else if (cell.kind === "progress") {
+                          text = `${cell.percent}%`;
+                          color = "#2196f3";
+                        }
+                        return (
+                          <td
+                            key={stageNum}
+                            style={{
+                              padding: "8px 4px",
+                              textAlign: "center",
+                              color,
+                              fontWeight: cell.kind === "progress" ? 600 : 400,
+                            }}
+                          >
+                            {cardIds.length === 0 && stageNum > 1 ? "—" : text}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p style={{ fontSize: "11px", color: "#999", margin: "0 0 16px" }}>
+            ✓ Done · % In progress · 🔒 Locked
+          </p>
+        </>
+      )}
     </main>
   );
 }
