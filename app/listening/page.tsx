@@ -12,6 +12,8 @@ import {
 } from "@/app/lib/stages";
 import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
 import { checkAndAwardBadges } from "@/app/lib/badges";
+import { BadgeEarnedModal } from "@/app/lib/badge-earned-modal";
+import { useBadgeQueue } from "@/app/lib/use-badge-queue";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -118,6 +120,10 @@ export default function ListeningPage() {
     moduleName: string;
     masteredCount: number;
   } | null>(null);
+
+  const { currentBadge, enqueueBadges, handleBadgeClose } = useBadgeQueue(
+    celebration !== null
+  );
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -298,7 +304,13 @@ export default function ListeningPage() {
             question.card.category
           );
           if (newBadges.length > 0) {
-            console.log("New badges:", newBadges);
+            enqueueBadges(
+              newBadges.map((b) => ({
+                module: STAGE_MODULES.LISTENING,
+                category: question.card.category,
+                threshold: b.threshold,
+              }))
+            );
           }
         } catch (e) {
           console.error("checkAndAwardBadges error:", e);
@@ -487,6 +499,11 @@ export default function ListeningPage() {
         moduleName={celebration?.moduleName ?? STAGE_MODULES.LISTENING}
         masteredCount={celebration?.masteredCount ?? 0}
         onClose={() => setCelebration(null)}
+      />
+      <BadgeEarnedModal
+        open={currentBadge !== null}
+        badge={currentBadge}
+        onClose={handleBadgeClose}
       />
     </main>
   );

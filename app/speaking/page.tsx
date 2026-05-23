@@ -12,6 +12,8 @@ import {
 } from "@/app/lib/stages";
 import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
 import { checkAndAwardBadges } from "@/app/lib/badges";
+import { BadgeEarnedModal } from "@/app/lib/badge-earned-modal";
+import { useBadgeQueue } from "@/app/lib/use-badge-queue";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -146,6 +148,10 @@ export default function SpeakingPage() {
     moduleName: string;
     masteredCount: number;
   } | null>(null);
+
+  const { currentBadge, enqueueBadges, handleBadgeClose } = useBadgeQueue(
+    celebration !== null
+  );
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -454,7 +460,13 @@ Output ONLY the JSON, no markdown.`;
               currentCard.category
             );
             if (newBadges.length > 0) {
-              console.log("New badges:", newBadges);
+              enqueueBadges(
+                newBadges.map((b) => ({
+                  module: STAGE_MODULES.SPEAKING_WORD,
+                  category: currentCard.category,
+                  threshold: b.threshold,
+                }))
+              );
             }
           } catch (e) {
             console.error("checkAndAwardBadges error:", e);
@@ -477,7 +489,13 @@ Output ONLY the JSON, no markdown.`;
                 cat
               );
               if (newBadges.length > 0) {
-                console.log("New badges (speaking-sentence):", newBadges);
+                enqueueBadges(
+                  newBadges.map((b) => ({
+                    module: STAGE_MODULES.SPEAKING_SENTENCE,
+                    category: cat,
+                    threshold: b.threshold,
+                  }))
+                );
               }
             } catch (e) {
               console.error("checkAndAwardBadges error:", e);
@@ -722,6 +740,11 @@ Output ONLY the JSON, no markdown.`;
         moduleName={celebration?.moduleName ?? STAGE_MODULES.SPEAKING_WORD}
         masteredCount={celebration?.masteredCount ?? 0}
         onClose={() => setCelebration(null)}
+      />
+      <BadgeEarnedModal
+        open={currentBadge !== null}
+        badge={currentBadge}
+        onClose={handleBadgeClose}
       />
     </main>
   );
