@@ -148,6 +148,29 @@ export async function markModuleBadgesAsViewed(
     .is("viewed_at", null);
 }
 
+// 単一バッジの既読化（モジュール単位の markModuleBadgesAsViewed とは別）
+export async function markBadgeAsViewed(
+  supabase: SupabaseClient,
+  badgeId: string
+): Promise<void> {
+  await supabase
+    .from("user_badges")
+    .update({ viewed_at: new Date().toISOString() })
+    .eq("id", badgeId)
+    .is("viewed_at", null);
+}
+
+export function getModuleDisplayLabel(module: string): string {
+  const labels: Record<string, string> = {
+    listening: "Listening",
+    "speaking-word": "Speaking (Word)",
+    "speaking-sentence": "Speaking (Sentence)",
+    reading_word: "Reading",
+    sentence: "Sentence",
+  };
+  return labels[module] ?? module;
+}
+
 // 既存ユーザーの過去の進捗から遡及的にバッジを発行する
 // 通知爆発を防ぐため、viewed_at = now() で既読扱い
 // 一度だけ実行されることを想定（重複実行しても unique 制約で安全）

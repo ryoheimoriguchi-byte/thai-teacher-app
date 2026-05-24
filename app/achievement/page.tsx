@@ -19,9 +19,12 @@ import {
   BADGE_MODULES,
   type BadgeModule,
   getBadgeEmoji,
+  getModuleDisplayLabel,
   getUnviewedBadgeCountByModule,
+  markBadgeAsViewed,
   markModuleBadgesAsViewed,
 } from "@/app/lib/badges";
+import { BadgeDetailModal } from "@/app/lib/badge-earned-modal";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -52,6 +55,9 @@ const MODULE_TABS: AchievementModuleTab[] = [
 
 type SubTab = "badges" | "timeline";
 type TimelineView = "new" | "total";
+
+const TIMELINE_CHART_HEIGHT = 280;
+const MODULE_BAR_CHART_HEIGHT = 220;
 
 function startOfWeek(d: Date): Date {
   const x = new Date(d);
@@ -109,6 +115,8 @@ export default function AchievementPage() {
   const [activeModuleTab, setActiveModuleTab] = useState<AchievementModuleTab["id"]>("listening");
   const [timelineView, setTimelineView] = useState<TimelineView>("new");
   const [unviewedByModule, setUnviewedByModule] = useState<Record<string, number>>({});
+  const [selectedBadge, setSelectedBadge] = useState<UserBadge | null>(null);
+  const [detailShowNew, setDetailShowNew] = useState(false);
 
   useEffect(() => {
     const userId = localStorage.getItem("currentUserId");
@@ -241,6 +249,29 @@ export default function AchievementPage() {
   const tabUnviewed = (tab: AchievementModuleTab) =>
     tab.modules.reduce((sum, m) => sum + (unviewedByModule[m] ?? 0), 0);
 
+  const handleBadgeClick = useCallback(async (badge: UserBadge) => {
+    const wasUnviewed = !badge.viewed_at;
+    setDetailShowNew(wasUnviewed);
+    setSelectedBadge(badge);
+
+    if (wasUnviewed) {
+      await markBadgeAsViewed(supabase, badge.id);
+      const viewedAt = new Date().toISOString();
+      setBadges((prev) =>
+        prev.map((b) => (b.id === badge.id ? { ...b, viewed_at: viewedAt } : b))
+      );
+      setUnviewedByModule((prev) => ({
+        ...prev,
+        [badge.module]: Math.max(0, (prev[badge.module] ?? 0) - 1),
+      }));
+    }
+  }, []);
+
+  const closeBadgeDetail = useCallback(() => {
+    setSelectedBadge(null);
+    setDetailShowNew(false);
+  }, []);
+
   if (!currentUser) {
     return (
       <main
@@ -283,8 +314,8 @@ export default function AchievementPage() {
   return (
     <main
       style={{
-        padding: "1.25rem 1rem 5rem",
-        maxWidth: "600px",
+        padding: subTab === "timeline" ? "0.75rem 0.5rem 5rem" : "1rem 0.75rem 5rem",
+        maxWidth: subTab === "timeline" ? "100%" : "600px",
         margin: "0 auto",
         background: "white",
         minHeight: "100vh",
@@ -399,13 +430,19 @@ export default function AchievementPage() {
                     const isNew = !b.viewed_at;
                     const emoji = getBadgeEmoji(b.category, b.threshold);
                     return (
-                      <div
+                      <button
                         key={b.id}
+                        type="button"
+                        onClick={() => handleBadgeClick(b)}
                         style={{
                           display: "flex",
                           flexDirection: "column",
                           alignItems: "center",
                           width: "48px",
+                          padding: 0,
+                          border: "none",
+                          background: "transparent",
+                          cursor: "pointer",
                         }}
                       >
                         <div
@@ -449,7 +486,7 @@ export default function AchievementPage() {
                         >
                           {b.threshold}
                         </span>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
@@ -461,7 +498,7 @@ export default function AchievementPage() {
 
       {subTab === "timeline" && (
         <>
-          <div style={{ display: "flex", gap: "8px", marginBottom: "1rem" }}>
+          <div style={{ display: "flex", gap: "8px", marginBottom: "0.5rem" }}>
             {(
               [
                 { id: "new" as TimelineView, label: "New Badges" },
@@ -494,31 +531,34 @@ export default function AchievementPage() {
               <div
                 style={{
                   background: "#f9f9f9",
-                  padding: "12px",
+                  padding: "8px 10px",
                   borderRadius: "8px",
-                  marginBottom: "12px",
-                  fontSize: "14px",
+                  marginBottom: "8px",
+                  fontSize: "12px",
+                  display: "flex",
+                  gap: "12px",
+                  flexWrap: "wrap",
                 }}
               >
-                <div>
+                <span>
                   This week: <strong>{newThisWeek.length}</strong> new
-                </div>
-                <div>
+                </span>
+                <span>
                   Streak: <strong>{streak}</strong> days 🔥
-                </div>
+                </span>
               </div>
-              <div style={{ width: "100%", height: 200, marginBottom: "1rem" }}>
-                <ResponsiveContainer>
-                  <BarChart data={weeklyNewCounts}>
+              <div style={{ width: "100%", height: TIMELINE_CHART_HEIGHT, marginBottom: "0.75rem" }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={weeklyNewCounts} margin={{ top: 4, right: 4, left: -16, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="week" tick={{ fontSize: 10 }} />
-                    <YAxis allowDecimals={false} tick={{ fontSize: 10 }} />
+                    <XAxis dataKey="week" tick={{ fontSize: 11 }} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 11 }} width={28} />
                     <Tooltip />
                     <Bar dataKey="count" fill="#66BB6A" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
-              <h3 style={{ fontSize: "13px", margin: "0 0 8px" }}>
+              <h3 style={{ fontSize: "12px", margin: "0 0 6px" }}>
                 Earned this week
               </h3>
               <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
@@ -563,25 +603,22 @@ export default function AchievementPage() {
               <div
                 style={{
                   background: "#f9f9f9",
-                  padding: "12px",
+                  padding: "8px 10px",
                   borderRadius: "8px",
-                  marginBottom: "12px",
-                  fontSize: "14px",
+                  marginBottom: "8px",
+                  fontSize: "12px",
                 }}
               >
-                <div>
-                  All time: <strong>{totalBadges}</strong> total
-                </div>
-                <div>
-                  Avg/week: <strong>{avgPerWeek}</strong>
-                </div>
+                All time: <strong>{totalBadges}</strong> total
+                <span style={{ margin: "0 8px", color: "#ccc" }}>·</span>
+                Avg/week: <strong>{avgPerWeek}</strong>
               </div>
-              <div style={{ width: "100%", height: 200, marginBottom: "1rem" }}>
-                <ResponsiveContainer>
-                  <LineChart data={cumulativeCounts}>
+              <div style={{ width: "100%", height: TIMELINE_CHART_HEIGHT, marginBottom: "0.75rem" }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={cumulativeCounts} margin={{ top: 4, right: 4, left: -16, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="week" tick={{ fontSize: 10 }} />
-                    <YAxis allowDecimals={false} tick={{ fontSize: 10 }} />
+                    <XAxis dataKey="week" tick={{ fontSize: 11 }} />
+                    <YAxis allowDecimals={false} tick={{ fontSize: 11 }} width={28} />
                     <Tooltip />
                     <Line
                       type="monotone"
@@ -593,20 +630,24 @@ export default function AchievementPage() {
                   </LineChart>
                 </ResponsiveContainer>
               </div>
-              <h3 style={{ fontSize: "13px", margin: "0 0 8px" }}>By module</h3>
-              <div style={{ width: "100%", height: 160 }}>
-                <ResponsiveContainer>
-                  <BarChart data={moduleBreakdown} layout="vertical">
+              <h3 style={{ fontSize: "12px", margin: "0 0 6px" }}>By module</h3>
+              <div style={{ width: "100%", height: MODULE_BAR_CHART_HEIGHT }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart
+                    data={moduleBreakdown}
+                    layout="vertical"
+                    margin={{ top: 4, right: 8, left: 0, bottom: 0 }}
+                  >
                     <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis type="number" allowDecimals={false} tick={{ fontSize: 10 }} />
+                    <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11 }} />
                     <YAxis
                       type="category"
                       dataKey="name"
-                      width={72}
-                      tick={{ fontSize: 10 }}
+                      width={88}
+                      tick={{ fontSize: 12 }}
                     />
                     <Tooltip />
-                    <Bar dataKey="count" fill="#81C784" radius={[0, 4, 4, 0]} />
+                    <Bar dataKey="count" fill="#81C784" radius={[0, 4, 4, 0]} barSize={28} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -614,6 +655,14 @@ export default function AchievementPage() {
           )}
         </>
       )}
+
+      <BadgeDetailModal
+        open={selectedBadge !== null}
+        badge={selectedBadge}
+        moduleLabel={selectedBadge ? getModuleDisplayLabel(selectedBadge.module) : ""}
+        showNew={detailShowNew}
+        onClose={closeBadgeDetail}
+      />
     </main>
   );
 }
