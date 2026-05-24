@@ -5,6 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "./lib/users";
 import {
   countMasteredInStage,
+  countMasteredInStageByDirection,
   fetchHomeStageData,
   getStageCellDisplay,
   HOME_STAGE_ROWS,
@@ -258,13 +259,117 @@ export default function Home() {
   const monthLabel = new Date(calendarYear, calendarMonth).toLocaleString("en", { month: "long" });
 
   const modules = [
-    { module: "listening", direction: "word-to-en", label: "🎧 Listening", dir: `${currentUser?.flag} → 🇬🇧` },
-    { module: "listening", direction: "en-to-word", label: "🎧 Listening", dir: `🇬🇧 → ${currentUser?.flag}` },
-    { module: "sentence", direction: "word-to-en", label: "💬 Sentence", dir: `${currentUser?.flag} → 🇬🇧` },
-    { module: "sentence", direction: "en-to-word", label: "💬 Sentence", dir: `🇬🇧 → ${currentUser?.flag}` },
-    { module: "speaking-word", direction: "en-to-word", label: "🎤 Speaking", dir: "Word" },
-    { module: "speaking-sentence", direction: "en-to-word", label: "🎤 Speaking", dir: "Sentence" },
+    { module: "listening", direction: "word-to-en", label: "🎧 Listening", dir: `${currentUser?.flag} → 🇬🇧`, stageModule: "listening" },
+    { module: "listening", direction: "en-to-word", label: "🎧 Listening", dir: `🇬🇧 → ${currentUser?.flag}`, stageModule: "listening" },
+    { module: "sentence", direction: "word-to-en", label: "💬 Sentence", dir: `${currentUser?.flag} → 🇬🇧`, stageModule: "sentence" },
+    { module: "sentence", direction: "en-to-word", label: "💬 Sentence", dir: `🇬🇧 → ${currentUser?.flag}`, stageModule: "sentence" },
+    { module: "speaking-word", direction: "en-to-word", label: "🎤 Speaking", dir: "Word", stageModule: "speaking-word" },
+    { module: "speaking-sentence", direction: "en-to-word", label: "🎤 Speaking", dir: "Sentence", stageModule: "speaking-sentence" },
   ];
+
+  type ProgressRow = {
+    key: string;
+    label: string;
+    mastered: number;
+    total: number;
+    weekly: number;
+  };
+
+  const getWeeklyNewInStage = (module: string, direction: string, cardIds: string[]) => {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const idSet = new Set(cardIds);
+    return wordProgress.filter(
+      (p) =>
+        p.module === module &&
+        p.direction === direction &&
+        p.mastered &&
+        p.mastered_at &&
+        idSet.has(p.card_id) &&
+        new Date(p.mastered_at) >= sevenDaysAgo
+    ).length;
+  };
+
+  const buildStageModuleProgressRows = (): ProgressRow[] => {
+    if (!stageHome) return [];
+    const rows: ProgressRow[] = [];
+    for (const { module, direction, label, dir, stageModule } of modules) {
+      const currentStage = stageHome.currentByModule[stageModule] ?? 1;
+      for (let stage = 1; stage <= currentStage; stage++) {
+        const cardIds = stageHome.cardsByStage.get(stage) ?? [];
+        rows.push({
+          key: `${module}-${direction}-stage-${stage}`,
+          label: `${label}: ${dir} (Stage ${stage})`,
+          mastered: countMasteredInStageByDirection(module, direction, cardIds, wordProgress),
+          total: cardIds.length,
+          weekly: getWeeklyNewInStage(module, direction, cardIds),
+        });
+      }
+    }
+    return rows;
+  };
+
+  const buildFlatModuleProgressRows = (): ProgressRow[] =>
+    modules.map(({ module, direction, label, dir }) => ({
+      key: `${module}-${direction}`,
+      label: `${label}: ${dir}`,
+      mastered: getMastered(module, direction),
+      total: totalWords,
+      weekly: getWeeklyNew(module, direction),
+    }));
+
+  const moduleProgressRows =
+    currentUser?.language === "JP" && stageHome
+      ? buildStageModuleProgressRows()
+      : buildFlatModuleProgressRows();
+
+  const buildReadingWordProgressRows = (): ProgressRow[] => {
+    if (currentUser?.language === "JP" && stageHome) {
+      const rows: ProgressRow[] = [];
+      const currentStage = stageHome.currentByModule.reading_word ?? 1;
+      for (let stage = 1; stage <= currentStage; stage++) {
+        const cardIds = stageHome.cardsByStage.get(stage) ?? [];
+        rows.push({
+          key: `reading-word-stage-${stage}`,
+          label: `📖 Reading: Word (Stage ${stage})`,
+          mastered: countMasteredInStageByDirection(
+            "reading_word",
+            "en-to-word",
+            cardIds,
+            wordProgress
+          ),
+          total: cardIds.length,
+          weekly: getWeeklyNewInStage("reading_word", "en-to-word", cardIds),
+        });
+      }
+      return rows;
+    }
+    return [
+      {
+        key: "reading-word",
+        label: "📖 Reading: Word",
+        mastered: getReadingWordMastered(),
+        total: jpReadingMeta.jpWordIds.length,
+        weekly: getReadingWordWeekly(),
+      },
+    ];
+  };
+
+  const readingWordProgressRows = buildReadingWordProgressRows();
+
+  const progressSubtitleTotal =
+    currentUser?.language === "JP" && stageHome
+      ? (() => {
+          const maxStage = Math.max(
+            1,
+            ...Object.values(stageHome.currentByModule).map((s) => s ?? 1)
+          );
+          return Array.from({ length: maxStage }, (_, i) => i + 1).reduce(
+            (sum, stage) => sum + (stageHome.cardsByStage.get(stage)?.length ?? 0),
+            0
+          );
+        })()
+      : totalWords;
 
   const weeklyMotivation = (count: number) => {
     if (count === 0) return { text: "Not started this week — let's go! 💪", color: "#f39c12" };
@@ -456,21 +561,19 @@ export default function Home() {
       <h3 style={{ fontSize: "14px", margin: "0 0 10px" }}>
         Progress{" "}
         <span style={{ fontSize: "11px", color: "#999", fontWeight: "normal" }}>
-          (out of {totalWords} {currentUser.language === "TH" ? "Thai" : "Japanese"} words)
+          (out of {progressSubtitleTotal} {currentUser.language === "TH" ? "Thai" : "Japanese"} words)
         </span>
       </h3>
 
-      {modules.map(({ module, direction, label, dir }) => {
-        const mastered = getMastered(module, direction);
-        const weekly = getWeeklyNew(module, direction);
+      {moduleProgressRows.map(({ key, label, mastered, total, weekly }) => {
         const motivation = weeklyMotivation(weekly);
-        const percent = totalWords > 0 ? Math.round((mastered / totalWords) * 100) : 0;
+        const percent = total > 0 ? Math.round((mastered / total) * 100) : 0;
 
         return (
-          <div key={`${module}-${direction}`} style={{ background: "#f9f9f9", padding: "12px", borderRadius: "8px", marginBottom: "8px" }}>
+          <div key={key} style={{ background: "#f9f9f9", padding: "12px", borderRadius: "8px", marginBottom: "8px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "6px" }}>
-              <span style={{ fontSize: "13px", fontWeight: "500" }}>{label}: {dir}</span>
-              <span style={{ fontSize: "12px", color: "#4caf50", fontWeight: "500" }}>{mastered} / {totalWords} ✓</span>
+              <span style={{ fontSize: "13px", fontWeight: "500" }}>{label}</span>
+              <span style={{ fontSize: "12px", color: "#4caf50", fontWeight: "500" }}>{mastered} / {total}</span>
             </div>
             <div style={{ background: "#ddd", height: "6px", borderRadius: "3px", overflow: "hidden", marginBottom: "6px" }}>
               <div style={{ background: "#4caf50", width: `${percent}%`, height: "100%", borderRadius: "3px", transition: "width 0.5s" }} />
@@ -497,13 +600,6 @@ export default function Home() {
           total: jpReadingMeta.katakanaIds.length,
           weekly: getReadingCharacterWeekly(jpReadingMeta.katakanaIds),
         },
-        {
-          key: "reading-word",
-          label: "📖 Reading: Word",
-          mastered: getReadingWordMastered(),
-          total: jpReadingMeta.jpWordIds.length,
-          weekly: getReadingWordWeekly(),
-        },
       ]).map(({ key, label, mastered, total, weekly }) => {
         const motivation = weeklyMotivation(weekly);
         const percent = total > 0 ? Math.round((mastered / total) * 100) : 0;
@@ -511,7 +607,26 @@ export default function Home() {
           <div key={key} style={{ background: "#f9f9f9", padding: "12px", borderRadius: "8px", marginBottom: "8px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "6px" }}>
               <span style={{ fontSize: "13px", fontWeight: "500" }}>{label}</span>
-              <span style={{ fontSize: "12px", color: "#4caf50", fontWeight: "500" }}>{mastered} / {total} ✓</span>
+              <span style={{ fontSize: "12px", color: "#4caf50", fontWeight: "500" }}>{mastered} / {total}</span>
+            </div>
+            <div style={{ background: "#ddd", height: "6px", borderRadius: "3px", overflow: "hidden", marginBottom: "6px" }}>
+              <div style={{ background: "#4caf50", width: `${percent}%`, height: "100%", borderRadius: "3px", transition: "width 0.5s" }} />
+            </div>
+            <span style={{ fontSize: "11px", color: motivation.color, fontWeight: "500" }}>
+              {motivation.text}
+            </span>
+          </div>
+        );
+      })}
+
+      {readingWordProgressRows.map(({ key, label, mastered, total, weekly }) => {
+        const motivation = weeklyMotivation(weekly);
+        const percent = total > 0 ? Math.round((mastered / total) * 100) : 0;
+        return (
+          <div key={key} style={{ background: "#f9f9f9", padding: "12px", borderRadius: "8px", marginBottom: "8px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "6px" }}>
+              <span style={{ fontSize: "13px", fontWeight: "500" }}>{label}</span>
+              <span style={{ fontSize: "12px", color: "#4caf50", fontWeight: "500" }}>{mastered} / {total}</span>
             </div>
             <div style={{ background: "#ddd", height: "6px", borderRadius: "3px", overflow: "hidden", marginBottom: "6px" }}>
               <div style={{ background: "#4caf50", width: `${percent}%`, height: "100%", borderRadius: "3px", transition: "width 0.5s" }} />
@@ -603,12 +718,9 @@ export default function Home() {
                         );
                         let text = "🔒";
                         let color = "#bbb";
-                        if (cell.kind === "done") {
-                          text = "✓";
-                          color = "#4caf50";
-                        } else if (cell.kind === "progress") {
+                        if (cell.kind === "progress") {
                           text = `${cell.percent}%`;
-                          color = "#2196f3";
+                          color = cell.percent >= 90 ? "#4caf50" : "#2196f3";
                         }
                         return (
                           <td
@@ -630,9 +742,6 @@ export default function Home() {
               </tbody>
             </table>
           </div>
-          <p style={{ fontSize: "11px", color: "#999", margin: "0 0 16px" }}>
-            ✓ Done · % In progress · 🔒 Locked
-          </p>
         </>
       )}
     </main>

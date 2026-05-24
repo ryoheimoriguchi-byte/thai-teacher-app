@@ -51,10 +51,7 @@ export function countMasteredInStage(
   return unique.size;
 }
 
-export type StageCellDisplay =
-  | { kind: "done" }
-  | { kind: "locked" }
-  | { kind: "progress"; percent: number };
+export type StageCellDisplay = { kind: "locked" } | { kind: "progress"; percent: number };
 
 export function getStageCellDisplay(
   stageNum: number,
@@ -62,10 +59,26 @@ export function getStageCellDisplay(
   mastered: number,
   total: number
 ): StageCellDisplay {
-  if (stageNum < currentStage) return { kind: "done" };
   if (stageNum > currentStage) return { kind: "locked" };
   const percent = total > 0 ? Math.round((mastered / total) * 100) : 0;
   return { kind: "progress", percent };
+}
+
+export function countMasteredInStageByDirection(
+  module: string,
+  direction: string,
+  cardIds: string[],
+  wordProgress: WordProgressRow[]
+): number {
+  if (cardIds.length === 0) return 0;
+  const idSet = new Set(cardIds);
+  return wordProgress.filter(
+    (p) =>
+      p.module === module &&
+      p.direction === direction &&
+      p.mastered &&
+      idSet.has(p.card_id)
+  ).length;
 }
 
 export async function fetchHomeStageData(
