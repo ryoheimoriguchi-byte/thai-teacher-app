@@ -111,3 +111,23 @@ export async function fetchHomeStageData(
 
   return { currentByModule, cardsByStage };
 }
+
+// Reading Character / Writing Character（将来）向け: character カードも Stage 別に集計できるようにする
+// ※ Phase 2-C で Home Stage 表に反映予定。現時点では呼び出し側は変更しない。
+export async function fetchHomeCharacterCardsByStage(
+  supabase: SupabaseClient
+): Promise<Map<number, string[]>> {
+  const { data: cards } = await supabase
+    .from("cards")
+    .select("id, stage")
+    .eq("language", "JP")
+    .eq("type", "character");
+
+  const cardsByStage = new Map<number, string[]>();
+  (cards ?? []).forEach((c) => {
+    const s = c.stage ?? 1;
+    if (!cardsByStage.has(s)) cardsByStage.set(s, []);
+    cardsByStage.get(s)!.push(c.id);
+  });
+  return cardsByStage;
+}

@@ -20,6 +20,7 @@ export type StageAdvanceResult = {
 const EN_TO_WORD_ONLY_MODULES: StageModule[] = [
   STAGE_MODULES.SPEAKING_WORD,
   STAGE_MODULES.READING_WORD,
+  STAGE_MODULES.READING_CHARACTER,
 ];
 
 export async function getUserStage(
@@ -48,35 +49,21 @@ export async function checkAndAdvanceStage(
   let cardIds: string[];
   let totalCount: number;
 
-  if (module === STAGE_MODULES.READING_CHARACTER) {
-    if (language !== "JP") {
-      return { advanced: false, masteredCount: 0, newStage: currentStage };
-    }
-    const characterType = currentStage === 1 ? "hiragana" : "katakana";
-    const { data: cards } = await supabase
-      .from("cards")
-      .select("id")
-      .eq("language", "JP")
-      .eq("type", "character")
-      .eq("character_type", characterType);
-    if (!cards || cards.length === 0) {
-      return { advanced: false, masteredCount: 0, newStage: currentStage };
-    }
-    totalCount = cards.length;
-    cardIds = cards.map((c) => c.id);
-  } else {
-    const { data: cards } = await supabase
-      .from("cards")
-      .select("id")
-      .eq("language", language)
-      .eq("type", "word")
-      .eq("stage", currentStage);
-    if (!cards || cards.length === 0) {
-      return { advanced: false, masteredCount: 0, newStage: currentStage };
-    }
-    totalCount = cards.length;
-    cardIds = cards.map((c) => c.id);
+  const isCharacterModule = module === STAGE_MODULES.READING_CHARACTER;
+  const targetLanguage = isCharacterModule ? "JP" : language;
+  const targetType = isCharacterModule ? "character" : "word";
+
+  const { data: cards } = await supabase
+    .from("cards")
+    .select("id")
+    .eq("language", targetLanguage)
+    .eq("type", targetType)
+    .eq("stage", currentStage);
+  if (!cards || cards.length === 0) {
+    return { advanced: false, masteredCount: 0, newStage: currentStage };
   }
+  totalCount = cards.length;
+  cardIds = cards.map((c) => c.id);
 
   let masteredCount = 0;
 

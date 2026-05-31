@@ -29,6 +29,7 @@ type Card = {
   breakdown: string;
   type?: string;
   character_type?: string | null;
+  reading_type?: "kun" | "on" | null;
   display_order?: number | null;
   stage?: number;
 };
@@ -182,14 +183,13 @@ export default function ReadingPage() {
     if (!currentUser) return;
     const fetchData = async () => {
       if (subMode === "character") {
-        const characterTypes =
-          stageCharacter >= 2 ? ["hiragana", "katakana"] : ["hiragana"];
         const { data: cardData } = await supabase
           .from("cards")
           .select("*")
           .eq("language", "JP")
           .eq("type", "character")
-          .in("character_type", characterTypes)
+          .lte("stage", stageCharacter)
+          .order("stage", { ascending: true })
           .order("display_order", { ascending: true });
         if (cardData) setCards(cardData);
       } else {
@@ -643,6 +643,11 @@ export default function ReadingPage() {
             <p style={{ fontSize: "11px", color: "#aaa", margin: "0 0 6px" }}>
               {subMode === "character" ? "Read this character in Japanese:" : "Read this word in Japanese:"}
             </p>
+            {subMode === "character" && currentCard.character_type === "kanji" && (
+              <div style={{ fontSize: "13px", color: "#888", marginBottom: "6px" }}>
+                {(currentCard.reading_type ?? "kun") === "kun" ? "訓読み" : "音読み"}で読んでね
+              </div>
+            )}
             {subMode === "character" && (
               <p style={{ fontSize: "72px", fontWeight: "600", margin: "8px 0", lineHeight: 1.2 }}>{targetText}</p>
             )}
