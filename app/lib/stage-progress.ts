@@ -1,5 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { STAGE_MODULES, type StageModule } from "@/app/lib/stages";
+import { getModuleMaxStage, STAGE_MODULES, type StageModule } from "@/app/lib/stages";
 
 export const HOME_STAGE_ROWS: { label: string; module: StageModule }[] = [
   { label: "Listening", module: STAGE_MODULES.LISTENING },
@@ -42,7 +42,8 @@ export function countMasteredInStage(
     if (p.module !== module || !p.mastered || !idSet.has(p.card_id)) continue;
     if (
       module === STAGE_MODULES.SPEAKING_WORD ||
-      module === STAGE_MODULES.READING_WORD
+      module === STAGE_MODULES.READING_WORD ||
+      module === STAGE_MODULES.READING_CHARACTER
     ) {
       if (p.direction !== "en-to-word") continue;
     }
@@ -51,14 +52,19 @@ export function countMasteredInStage(
   return unique.size;
 }
 
-export type StageCellDisplay = { kind: "locked" } | { kind: "progress"; percent: number };
+export type StageCellDisplay =
+  | { kind: "locked" }
+  | { kind: "progress"; percent: number }
+  | { kind: "na" };
 
 export function getStageCellDisplay(
   stageNum: number,
   currentStage: number,
   mastered: number,
-  total: number
+  total: number,
+  module?: StageModule
 ): StageCellDisplay {
+  if (module && stageNum > getModuleMaxStage(module)) return { kind: "na" };
   if (stageNum > currentStage) return { kind: "locked" };
   const percent = total > 0 ? Math.round((mastered / total) * 100) : 0;
   return { kind: "progress", percent };
@@ -112,8 +118,11 @@ export async function fetchHomeStageData(
   return { currentByModule, cardsByStage };
 }
 
-// Reading Character / Writing Character（将来）向け: character カードも Stage 別に集計できるようにする
-// ※ Phase 2-C で Home Stage 表に反映予定。現時点では呼び出し側は変更しない。
+/**
+ * Stage 別の character cardIds を取得する。
+ * 現状は Reading Character (hiragana/katakana) が Stage 1-2 のみのため、Stage 3-5 では空配列を返す。
+ * 将来、漢字モジュールが別立てで実装される時に再利用される想定。
+ */
 export async function fetchHomeCharacterCardsByStage(
   supabase: SupabaseClient
 ): Promise<Map<number, string[]>> {

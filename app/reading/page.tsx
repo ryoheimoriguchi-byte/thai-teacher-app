@@ -6,6 +6,7 @@ import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
 import { WordBreakdown } from "@/app/lib/word-breakdown";
 import {
   checkAndAdvanceStage,
+  getModuleMaxStage,
   getUserStage,
   STAGE_MODULES,
 } from "@/app/lib/stages";
@@ -29,7 +30,6 @@ type Card = {
   breakdown: string;
   type?: string;
   character_type?: string | null;
-  reading_type?: "kun" | "on" | null;
   display_order?: number | null;
   stage?: number;
 };
@@ -175,7 +175,9 @@ export default function ReadingPage() {
       getUserStage(supabase, currentUser.id, "JP", STAGE_MODULES.READING_CHARACTER),
     ]).then(([w, c]) => {
       setStageWord(w);
-      setStageCharacter(c);
+      setStageCharacter(
+        Math.min(c, getModuleMaxStage(STAGE_MODULES.READING_CHARACTER))
+      );
     });
   }, [currentUser]);
 
@@ -504,6 +506,10 @@ export default function ReadingPage() {
     cards.length > 0 &&
     cards.every((c) => getProgress(c.id)?.mastered === true);
 
+  const characterMaxStage = getModuleMaxStage(STAGE_MODULES.READING_CHARACTER);
+  const characterComplete =
+    subMode === "character" && stageCharacter >= characterMaxStage;
+
   const targetText = currentCard?.word;
   const targetPron = currentCard?.pronunciation;
 
@@ -609,6 +615,26 @@ export default function ReadingPage() {
         </span>
       </p>
 
+      {characterComplete && (
+        <div
+          style={{
+            background: "#e3f2fd",
+            border: "1px solid #90caf9",
+            borderRadius: "8px",
+            padding: "12px",
+            marginBottom: "1rem",
+            textAlign: "center",
+          }}
+        >
+          <p style={{ margin: 0, color: "#1565c0", fontWeight: 600, fontSize: "14px" }}>
+            Reading Character complete!
+          </p>
+          <p style={{ margin: "4px 0 0", color: "#666", fontSize: "12px" }}>
+            Stage {characterMaxStage} is the maximum for hiragana &amp; katakana.
+          </p>
+        </div>
+      )}
+
       {showMastered && (
         <div style={{ background: "#d4edda", border: "1px solid #28a745", borderRadius: "8px", padding: "12px", marginBottom: "1rem", textAlign: "center" }}>
           <p style={{ margin: 0, color: "#28a745", fontWeight: "bold" }}>⭐ Mastered! 3 times 4/5 or above!</p>
@@ -643,11 +669,6 @@ export default function ReadingPage() {
             <p style={{ fontSize: "11px", color: "#aaa", margin: "0 0 6px" }}>
               {subMode === "character" ? "Read this character in Japanese:" : "Read this word in Japanese:"}
             </p>
-            {subMode === "character" && currentCard.character_type === "kanji" && (
-              <div style={{ fontSize: "13px", color: "#888", marginBottom: "6px" }}>
-                {(currentCard.reading_type ?? "kun") === "kun" ? "訓読み" : "音読み"}で読んでね
-              </div>
-            )}
             {subMode === "character" && (
               <p style={{ fontSize: "72px", fontWeight: "600", margin: "8px 0", lineHeight: 1.2 }}>{targetText}</p>
             )}

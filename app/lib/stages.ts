@@ -23,6 +23,17 @@ const EN_TO_WORD_ONLY_MODULES: StageModule[] = [
   STAGE_MODULES.READING_CHARACTER,
 ];
 
+/** Reading Character は hiragana/katakana のみのため Stage 2 が上限。漢字は別モジュールで将来対応。 */
+export const MODULE_MAX_STAGE: Partial<Record<StageModule, number>> = {
+  [STAGE_MODULES.READING_CHARACTER]: 2,
+};
+
+const DEFAULT_MAX_STAGE = 5;
+
+export function getModuleMaxStage(module: StageModule): number {
+  return MODULE_MAX_STAGE[module] ?? DEFAULT_MAX_STAGE;
+}
+
 export async function getUserStage(
   supabase: SupabaseClient,
   userId: string,
@@ -107,7 +118,12 @@ export async function checkAndAdvanceStage(
     return { advanced: false, masteredCount, newStage: currentStage };
   }
 
+  const maxStage = getModuleMaxStage(module);
   const nextStage = currentStage + 1;
+  if (nextStage > maxStage) {
+    return { advanced: false, masteredCount, newStage: currentStage };
+  }
+
   await supabase
     .from("user_module_stages")
     .update({ current_stage: nextStage, updated_at: new Date().toISOString() })
