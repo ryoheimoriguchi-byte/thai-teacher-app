@@ -11,6 +11,7 @@ import {
   HOME_STAGE_ROWS,
   STAGE_COLUMN_NUMBERS,
 } from "./lib/stage-progress";
+import { fetchAllWordProgress } from "./lib/word-progress";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -97,14 +98,14 @@ export default function Home() {
   useEffect(() => {
     if (!currentUser) return;
     const fetchData = async () => {
-      const [{ data: cardData }, { data: progressData }, { data: sessionData }, { data: jpCharCards }, { data: jpWordCards }] =
+      const [{ data: cardData }, progressData, { data: sessionData }, { data: jpCharCards }, { data: jpWordCards }] =
         await Promise.all([
           supabase
             .from("cards")
             .select("id, language")
             .eq("language", currentUser.language)
             .eq("type", "word"),
-          supabase.from("word_progress").select("*").eq("user_id", currentUser.id),
+          fetchAllWordProgress(supabase, currentUser.id),
           supabase
             .from("study_sessions")
             .select("*")

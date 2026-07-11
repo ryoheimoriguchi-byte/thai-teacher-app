@@ -13,6 +13,7 @@ import {
 import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
 import { checkAndAwardBadges } from "@/app/lib/badges";
 import { BadgeEarnedModal } from "@/app/lib/badge-earned-modal";
+import { fetchAllWordProgress } from "@/app/lib/word-progress";
 import { useBadgeQueue } from "@/app/lib/use-badge-queue";
 
 const supabase = createClient(
@@ -430,11 +431,9 @@ export default function SentenceListeningPage() {
         .lte("stage", currentStage);
       if (cardData) setCards(cardData);
 
-      const { data: progressData } = await supabase
-        .from("word_progress")
-        .select("*")
-        .eq("user_id", currentUser.id)
-        .eq("module", "sentence");
+      const progressData = await fetchAllWordProgress(supabase, currentUser.id, {
+        module: "sentence",
+      });
       if (progressData) setWordProgress(progressData);
     };
     fetchData();

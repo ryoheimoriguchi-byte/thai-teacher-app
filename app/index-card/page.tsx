@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
 import { speak } from "@/app/lib/tts";
+import { fetchAllWordProgress } from "@/app/lib/word-progress";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -80,10 +81,7 @@ export default function IndexCardPage() {
         .order("created_at");
       if (cardData) setCards(cardData);
 
-      const { data: progressData } = await supabase
-        .from("word_progress")
-        .select("*")
-        .eq("user_id", currentUser.id);
+      const progressData = await fetchAllWordProgress(supabase, currentUser.id);
       if (progressData) setWordProgress(progressData);
     };
     fetchData();
