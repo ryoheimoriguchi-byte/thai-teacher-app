@@ -14,6 +14,13 @@ import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
 import { checkAndAwardBadges } from "@/app/lib/badges";
 import { BadgeEarnedModal } from "@/app/lib/badge-earned-modal";
 import { fetchAllWordProgress } from "@/app/lib/word-progress";
+import {
+  ALL_CATEGORIES,
+  buildCategoryOptions,
+  CategoryFilterSelect,
+  CategoryNotice,
+  filterByCategory,
+} from "@/app/lib/category-filter";
 import { useBadgeQueue } from "@/app/lib/use-badge-queue";
 
 const supabase = createClient(
@@ -122,6 +129,7 @@ export default function ReadingPage() {
   const [wordProgress, setWordProgress] = useState<WordProgress[]>([]);
   const [subMode, setSubMode] = useState<ReadingSubMode>("character");
   const [wordMode, setWordMode] = useState<WordMode>("all");
+  const [category, setCategory] = useState<string>(ALL_CATEGORIES);
   const [sortMode, setSortMode] = useState<CharacterSortMode>("gojuon");
   const [currentCard, setCurrentCard] = useState<Card | null>(null);
   const [history, setHistory] = useState<Card[]>([]);
@@ -225,19 +233,18 @@ export default function ReadingPage() {
     if (cards.length === 0) return;
 
     if (subMode === "word") {
-      let pool = cards;
+      let pool = filterByCategory(cards, category);
       if (wordMode === "new-only") {
-        const filtered = cards.filter((c) => !getProgress(c.id)?.mastered);
-        if (filtered.length === 0) {
-          if (addToHistory && currentCard) {
-            setHistory((prev) => [...prev, currentCard]);
-          }
-          setCurrentCard(null);
-          setResult(null);
-          setShowMastered(false);
-          return;
+        pool = pool.filter((c) => !getProgress(c.id)?.mastered);
+      }
+      if (pool.length === 0) {
+        if (addToHistory && currentCard) {
+          setHistory((prev) => [...prev, currentCard]);
         }
-        pool = filtered;
+        setCurrentCard(null);
+        setResult(null);
+        setShowMastered(false);
+        return;
       }
 
       if (addToHistory && currentCard) {
@@ -328,7 +335,7 @@ export default function ReadingPage() {
     }
     setResult(null);
     setShowMastered(false);
-  }, [cards, wordMode, wordProgress, currentCard, subMode, sortMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, wordMode, category, wordProgress, currentCard, subMode, sortMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const goBack = () => {
     if (history.length === 0) return;
@@ -343,7 +350,7 @@ export default function ReadingPage() {
     if (cards.length > 0 && currentUser) {
       pickNextCard(false);
     }
-  }, [cards, subMode, wordMode, currentUser, sortMode]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, subMode, wordMode, category, currentUser, sortMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startRecording = async () => {
     try {
@@ -499,7 +506,26 @@ export default function ReadingPage() {
     );
   }
 
+  // Character cards have no meaningful category, so the filter is Word-only.
+  const categoryActive = subMode === "word";
+  const categoryOptions: string[] = categoryActive
+    ? buildCategoryOptions(cards, {
+        onlyUnmastered: wordMode === "new-only",
+        isMastered: (c) => getProgress(c.id)?.mastered === true,
+        selected: category,
+      })
+    : [];
+
+  const categorySelected = categoryActive && category !== ALL_CATEGORIES;
+  const categoryCards: Card[] = categorySelected ? filterByCategory(cards, category) : [];
+  const categoryCleared =
+    categorySelected &&
+    wordMode === "new-only" &&
+    categoryCards.length > 0 &&
+    categoryCards.every((c) => getProgress(c.id)?.mastered === true);
+
   const allDone =
+    !categorySelected &&
     wordMode === "new-only" &&
     cards.length > 0 &&
     cards.every((c) => getProgress(c.id)?.mastered === true);
@@ -512,7 +538,7 @@ export default function ReadingPage() {
   const targetPron = currentCard?.pronunciation;
 
   const isLoading =
-    !allDone && currentCard === null && cards.length > 0;
+    !allDone && !categoryCleared && currentCard === null && cards.length > 0;
 
   return (
     <main style={{ padding: "2rem", maxWidth: "600px", margin: "0 auto", background: "white", minHeight: "100vh", color: "#111" }}>
@@ -606,6 +632,14 @@ export default function ReadingPage() {
         ))}
       </div>
 
+      {categoryActive && (
+        <CategoryFilterSelect
+          value={category}
+          categories={categoryOptions}
+          onChange={setCategory}
+        />
+      )}
+
       <p style={{ color: "#666", fontSize: "14px", marginBottom: "1.5rem" }}>
         Score: {score.passed} / {score.total}
         <span style={{ marginLeft: "12px", fontSize: "13px", color: "#4caf50" }}>
@@ -637,6 +671,14 @@ export default function ReadingPage() {
         <div style={{ background: "#d4edda", border: "1px solid #28a745", borderRadius: "8px", padding: "12px", marginBottom: "1rem", textAlign: "center" }}>
           <p style={{ margin: 0, color: "#28a745", fontWeight: "bold" }}>⭐ Mastered! 3 times 4/5 or above!</p>
         </div>
+      )}
+
+      {categoryCleared && (
+        <CategoryNotice
+          tone="success"
+          title="🎉 You've mastered all words in this category!"
+          detail='Pick another category, or switch back to "All categories" to keep practising.'
+        />
       )}
 
       {allDone && (

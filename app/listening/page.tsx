@@ -14,6 +14,13 @@ import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
 import { checkAndAwardBadges } from "@/app/lib/badges";
 import { BadgeEarnedModal } from "@/app/lib/badge-earned-modal";
 import { fetchAllWordProgress } from "@/app/lib/word-progress";
+import {
+  ALL_CATEGORIES,
+  buildCategoryOptions,
+  CategoryFilterSelect,
+  CategoryNotice,
+  filterByCategory,
+} from "@/app/lib/category-filter";
 import { useBadgeQueue } from "@/app/lib/use-badge-queue";
 
 const supabase = createClient(
@@ -110,6 +117,7 @@ export default function ListeningPage() {
   const [wordProgress, setWordProgress] = useState<WordProgress[]>([]);
   const [direction, setDirection] = useState<Direction>("word-to-en");
   const [wordMode, setWordMode] = useState<WordMode>("all");
+  const [category, setCategory] = useState<string>(ALL_CATEGORIES);
   const [question, setQuestion] = useState<Question | null>(null);
   const [history, setHistory] = useState<Question[]>([]);
   const [selectedAnswer, setSelectedAnswer] = useState<Card | null>(null);
@@ -190,18 +198,18 @@ export default function ListeningPage() {
     // Total deck must supply 4 distinct cards (1 correct + 3 distractors).
     if (cards.length < 4) return;
 
-    let targetPool = cards;
+    let targetPool = filterByCategory(cards, category);
     if (wordMode === "new-only") {
-      targetPool = cards.filter((c) => !getProgress(c.id, direction)?.mastered);
-      if (targetPool.length === 0) {
-        if (addToHistory && question) {
-          setHistory((prev) => [...prev, question]);
-        }
-        setQuestion(null);
-        setSelectedAnswer(null);
-        setShowMastered(false);
-        return;
+      targetPool = targetPool.filter((c) => !getProgress(c.id, direction)?.mastered);
+    }
+    if (targetPool.length === 0) {
+      if (addToHistory && question) {
+        setHistory((prev) => [...prev, question]);
       }
+      setQuestion(null);
+      setSelectedAnswer(null);
+      setShowMastered(false);
+      return;
     }
 
     const correctCard = targetPool[Math.floor(Math.random() * targetPool.length)];
@@ -228,7 +236,7 @@ export default function ListeningPage() {
     setQuestion(newQuestion);
     setSelectedAnswer(null);
     setShowMastered(false);
-  }, [cards, direction, wordMode, currentUser, wordProgress, question]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, direction, wordMode, category, currentUser, wordProgress, question]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const goBack = () => {
     if (history.length === 0) return;
@@ -241,7 +249,7 @@ export default function ListeningPage() {
 
   useEffect(() => {
     if (cards.length > 0 && currentUser) generateQuestion(false);
-  }, [cards, direction, wordMode, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, direction, wordMode, category, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleAnswer = async (answer: Card) => {
     if (selectedAnswer || !question || !currentUser) return;
@@ -326,6 +334,19 @@ export default function ListeningPage() {
     );
   }
 
+  const categoryOptions = buildCategoryOptions(cards, {
+    onlyUnmastered: wordMode === "new-only",
+    isMastered: (c) => getProgress(c.id, direction)?.mastered === true,
+    selected: category,
+  });
+
+  const categoryCards = filterByCategory(cards, category);
+  const categoryCleared =
+    category !== ALL_CATEGORIES &&
+    wordMode === "new-only" &&
+    categoryCards.length > 0 &&
+    categoryCards.every((c) => getProgress(c.id, direction)?.mastered === true);
+
   return (
     <main style={{ padding: "2rem", maxWidth: "600px", margin: "0 auto", background: "white", minHeight: "100vh", color: "#111" }}>
       <h1 style={{ marginBottom: "0.5rem" }}>🎧 Word Listening</h1>
@@ -364,6 +385,12 @@ export default function ListeningPage() {
         ))}
       </div>
 
+      <CategoryFilterSelect
+        value={category}
+        categories={categoryOptions}
+        onChange={setCategory}
+      />
+
       <p style={{ color: "#666", fontSize: "14px", marginBottom: "1.5rem" }}>
         Score: {score.correct} / {score.total}
         <span style={{ marginLeft: "12px", fontSize: "13px", color: "#4caf50" }}>
@@ -371,7 +398,16 @@ export default function ListeningPage() {
         </span>
       </p>
 
-      {wordMode === "new-only" &&
+      {categoryCleared && (
+        <CategoryNotice
+          tone="success"
+          title="🎉 You've mastered all words in this category!"
+          detail='Pick another category, or switch back to "All categories" to keep practising.'
+        />
+      )}
+
+      {category === ALL_CATEGORIES &&
+        wordMode === "new-only" &&
         cards.length > 0 &&
         cards.every((c) => getProgress(c.id, direction)?.mastered === true) && (
         <div

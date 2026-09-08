@@ -14,6 +14,13 @@ import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
 import { checkAndAwardBadges } from "@/app/lib/badges";
 import { BadgeEarnedModal } from "@/app/lib/badge-earned-modal";
 import { fetchAllWordProgress } from "@/app/lib/word-progress";
+import {
+  ALL_CATEGORIES,
+  buildCategoryOptions,
+  CategoryFilterSelect,
+  CategoryNotice,
+  filterByCategory,
+} from "@/app/lib/category-filter";
 import { useBadgeQueue } from "@/app/lib/use-badge-queue";
 
 const supabase = createClient(
@@ -66,6 +73,9 @@ type HistoryItem = {
 
 type Mode = "word" | "sentence";
 type WordMode = "all" | "new-only";
+
+/** Minimum deck size the sentence generator needs to build a sentence. */
+const SENTENCE_MIN_WORDS = 3;
 
 function shuffleArray<T>(items: T[]): T[] {
   return [...items].sort(() => Math.random() - 0.5);
@@ -131,6 +141,7 @@ export default function SpeakingPage() {
   const [wordProgress, setWordProgress] = useState<WordProgress[]>([]);
   const [mode, setMode] = useState<Mode>("word");
   const [wordMode, setWordMode] = useState<WordMode>("all");
+  const [category, setCategory] = useState<string>(ALL_CATEGORIES);
   const [currentCard, setCurrentCard] = useState<Card | null>(null);
   const [sentenceData, setSentenceData] = useState<SentenceData | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -217,19 +228,18 @@ export default function SpeakingPage() {
 
   const pickNextCard = useCallback((addToHistory = true) => {
     if (cards.length === 0) return;
-    let pool = cards;
+    let pool = filterByCategory(cards, category);
     if (wordMode === "new-only") {
-      const filtered = cards.filter((c) => !getProgress(c.id)?.mastered);
-      if (filtered.length === 0) {
-        if (addToHistory && currentCard) {
-          setHistory((prev) => [...prev, { type: "word", card: currentCard }]);
-        }
-        setCurrentCard(null);
-        setResult(null);
-        setShowMastered(false);
-        return;
+      pool = pool.filter((c) => !getProgress(c.id)?.mastered);
+    }
+    if (pool.length === 0) {
+      if (addToHistory && currentCard) {
+        setHistory((prev) => [...prev, { type: "word", card: currentCard }]);
       }
-      pool = filtered;
+      setCurrentCard(null);
+      setResult(null);
+      setShowMastered(false);
+      return;
     }
 
     if (addToHistory && currentCard) {
@@ -240,29 +250,37 @@ export default function SpeakingPage() {
     setCurrentCard(card);
     setResult(null);
     setShowMastered(false);
-  }, [cards, wordMode, wordProgress, currentCard]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, wordMode, category, wordProgress, currentCard]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const generateSentence = useCallback(async (addToHistory = true) => {
     if (!currentUser) return;
 
-    let workPool = cards;
+    let workPool = filterByCategory(cards, category);
     if (wordMode === "new-only") {
-      const filtered = cards.filter((c) => !getProgress(c.id)?.mastered);
-      if (filtered.length === 0) {
-        if (addToHistory && sentenceData) {
-          setHistory((prev) => [...prev, { type: "sentence", data: sentenceData }]);
-        }
+      workPool = workPool.filter((c) => !getProgress(c.id)?.mastered);
+    }
+    if (workPool.length === 0) {
+      if (addToHistory && sentenceData) {
+        setHistory((prev) => [...prev, { type: "sentence", data: sentenceData }]);
+      }
+      setSentenceData(null);
+      setResult(null);
+      setShowMastered(false);
+      setIsGenerating(false);
+      return;
+    }
+
+    if (workPool.length < SENTENCE_MIN_WORDS) {
+      if (category === ALL_CATEGORIES) {
+        alert("Need at least 3 words to generate a sentence.");
+      } else {
+        // A hand-picked category can run below the generator's minimum; clear the
+        // stale sentence so the inline notice is what the learner sees.
         setSentenceData(null);
         setResult(null);
         setShowMastered(false);
         setIsGenerating(false);
-        return;
       }
-      workPool = filtered;
-    }
-
-    if (workPool.length < 3) {
-      alert("Need at least 3 words to generate a sentence.");
       return;
     }
 
@@ -277,8 +295,8 @@ export default function SpeakingPage() {
     const chosen = eligible.length > 0
       ? eligible[Math.floor(Math.random() * eligible.length)]
       : ranked[0];
-    if (!chosen || chosen[1].length < 3) {
-      alert("Need at least 3 words in one category.");
+    if (!chosen || chosen[1].length < SENTENCE_MIN_WORDS) {
+      if (category === ALL_CATEGORIES) alert("Need at least 3 words in one category.");
       return;
     }
     const [, categoryPool] = chosen;
@@ -326,7 +344,7 @@ Output ONLY the JSON, no markdown.`;
     } finally {
       setIsGenerating(false);
     }
-  }, [cards, wordMode, currentUser, langLabel, sentenceData]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, wordMode, category, currentUser, langLabel, sentenceData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const goBack = () => {
     if (history.length === 0) return;
@@ -346,7 +364,7 @@ Output ONLY the JSON, no markdown.`;
       if (mode === "word") pickNextCard(false);
       else generateSentence(false);
     }
-  }, [cards, mode, wordMode, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, mode, wordMode, category, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startRecording = async () => {
     try {
@@ -534,14 +552,36 @@ Output ONLY the JSON, no markdown.`;
     );
   }
 
+  const categoryOptions = buildCategoryOptions(cards, {
+    onlyUnmastered: wordMode === "new-only",
+    isMastered: (c) => getProgress(c.id)?.mastered === true,
+    selected: category,
+  });
+
+  const categoryCards = filterByCategory(cards, category);
+  const categoryAvailable =
+    wordMode === "new-only"
+      ? categoryCards.filter((c) => !getProgress(c.id)?.mastered)
+      : categoryCards;
+  const categorySelected = category !== ALL_CATEGORIES;
+  const categoryCleared =
+    categorySelected && categoryCards.length > 0 && categoryAvailable.length === 0;
+  const categoryTooSmall =
+    categorySelected &&
+    mode === "sentence" &&
+    categoryAvailable.length > 0 &&
+    categoryAvailable.length < SENTENCE_MIN_WORDS;
+
   const allDoneWord =
     mode === "word" &&
+    !categorySelected &&
     wordMode === "new-only" &&
     cards.length > 0 &&
     cards.every((c) => getProgress(c.id)?.mastered === true);
 
   const allDoneSentence =
     mode === "sentence" &&
+    !categorySelected &&
     wordMode === "new-only" &&
     cards.length > 0 &&
     cards.every((c) => getProgress(c.id)?.mastered === true);
@@ -551,7 +591,11 @@ Output ONLY the JSON, no markdown.`;
   const targetMeaning = mode === "word" ? currentCard?.meaning : sentenceData?.meaning;
   const isLoading =
     isGenerating ||
-    (mode === "word" && !allDoneWord && currentCard === null && cards.length > 0);
+    (mode === "word" &&
+      !allDoneWord &&
+      !categoryCleared &&
+      currentCard === null &&
+      cards.length > 0);
 
   return (
     <main style={{ padding: "2rem", maxWidth: "600px", margin: "0 auto", background: "white", minHeight: "100vh", color: "#111" }}>
@@ -591,6 +635,12 @@ Output ONLY the JSON, no markdown.`;
         ))}
       </div>
 
+      <CategoryFilterSelect
+        value={category}
+        categories={categoryOptions}
+        onChange={setCategory}
+      />
+
       <p style={{ color: "#666", fontSize: "14px", marginBottom: "1.5rem" }}>
         Score: {score.passed} / {score.total}
         <span style={{ marginLeft: "12px", fontSize: "13px", color: "#4caf50" }}>
@@ -602,6 +652,22 @@ Output ONLY the JSON, no markdown.`;
         <div style={{ background: "#d4edda", border: "1px solid #28a745", borderRadius: "8px", padding: "12px", marginBottom: "1rem", textAlign: "center" }}>
           <p style={{ margin: 0, color: "#28a745", fontWeight: "bold" }}>⭐ Word Mastered! 3 times 4/5 or above!</p>
         </div>
+      )}
+
+      {categoryCleared && (
+        <CategoryNotice
+          tone="success"
+          title="🎉 You've mastered all words in this category!"
+          detail='Pick another category, or switch back to "All categories" to keep practising.'
+        />
+      )}
+
+      {categoryTooSmall && (
+        <CategoryNotice
+          tone="info"
+          title="Not enough words left here"
+          detail={`Sentences need at least ${SENTENCE_MIN_WORDS} words. Pick a bigger category, or switch to "All words".`}
+        />
       )}
 
       {(allDoneWord || allDoneSentence) && (

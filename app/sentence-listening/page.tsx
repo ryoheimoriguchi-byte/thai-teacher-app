@@ -14,6 +14,13 @@ import { StageUpCelebration } from "@/app/lib/stage-up-celebration";
 import { checkAndAwardBadges } from "@/app/lib/badges";
 import { BadgeEarnedModal } from "@/app/lib/badge-earned-modal";
 import { fetchAllWordProgress } from "@/app/lib/word-progress";
+import {
+  ALL_CATEGORIES,
+  buildCategoryOptions,
+  CategoryFilterSelect,
+  CategoryNotice,
+  filterByCategory,
+} from "@/app/lib/category-filter";
 import { useBadgeQueue } from "@/app/lib/use-badge-queue";
 
 const supabase = createClient(
@@ -136,6 +143,9 @@ GOOD pattern: [0] noun swap in same theme, [1] change verb/predicate, [2] rephra
 
 wrongOptionsPronunciation must align with wrongOptions (romanization).
 `.trim();
+
+/** Minimum deck size the sentence generator needs to build a question. */
+const SENTENCE_MIN_WORDS = 5;
 
 function buildWordsGroupedByCategory(pool: Card[]): string {
   const by = new Map<string, Card[]>();
@@ -369,6 +379,7 @@ export default function SentenceListeningPage() {
   const [filterLanguage, setFilterLanguage] = useState("TH");
   const [direction, setDirection] = useState<Direction>("word-to-en");
   const [wordMode, setWordMode] = useState<WordMode>("all");
+  const [category, setCategory] = useState<string>(ALL_CATEGORIES);
   const [question, setQuestion] = useState<SentenceQuestion | null>(null);
   const [shuffledOptions, setShuffledOptions] = useState<Option[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -453,28 +464,39 @@ export default function SentenceListeningPage() {
   const generateQuestion = useCallback(async (addToHistory = true) => {
     if (!currentUser) return;
 
-    const basePool = cards.filter((c) => c.language === filterLanguage);
+    const basePool = filterByCategory(
+      cards.filter((c) => c.language === filterLanguage),
+      category
+    );
 
-    let workPool: Card[];
+    let workPool = basePool;
     if (wordMode === "new-only") {
-      const targetPool = basePool.filter((c) => !getProgress(c.id, direction)?.mastered);
-      if (targetPool.length === 0) {
-        if (addToHistory && question) {
-          setHistory((prev) => [...prev, { question, options: shuffledOptions }]);
-        }
+      workPool = basePool.filter((c) => !getProgress(c.id, direction)?.mastered);
+    }
+    if (workPool.length === 0) {
+      if (addToHistory && question) {
+        setHistory((prev) => [...prev, { question, options: shuffledOptions }]);
+      }
+      setQuestion(null);
+      setShuffledOptions([]);
+      setSelectedAnswer(null);
+      setShowMastered([]);
+      setLoading(false);
+      return;
+    }
+
+    if (workPool.length < SENTENCE_MIN_WORDS) {
+      // A hand-picked category can run below the generator's minimum; clear the
+      // stale question so the inline notice is what the learner sees.
+      if (category !== ALL_CATEGORIES) {
         setQuestion(null);
         setShuffledOptions([]);
         setSelectedAnswer(null);
         setShowMastered([]);
         setLoading(false);
-        return;
       }
-      workPool = targetPool;
-    } else {
-      workPool = basePool;
+      return;
     }
-
-    if (workPool.length < 5) return;
 
     // 履歴に追加
     if (addToHistory && question) {
@@ -697,7 +719,7 @@ Output ONLY the JSON, no markdown, no explanation`;
     } finally {
       setLoading(false);
     }
-  }, [cards, filterLanguage, speechLang, direction, wordMode, currentUser, langLabel, question, shuffledOptions]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, filterLanguage, speechLang, direction, wordMode, category, currentUser, langLabel, question, shuffledOptions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const goBack = () => {
     if (history.length === 0) return;
@@ -711,7 +733,7 @@ Output ONLY the JSON, no markdown, no explanation`;
 
   useEffect(() => {
     if (cards.length > 0 && currentUser) generateQuestion(false);
-  }, [cards, filterLanguage, direction, wordMode, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [cards, filterLanguage, direction, wordMode, category, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleAnswer = async (answer: string) => {
     if (selectedAnswer || !question || !currentUser) return;
@@ -805,6 +827,27 @@ Output ONLY the JSON, no markdown, no explanation`;
     );
   }
 
+  const languageCards = cards.filter((c) => c.language === filterLanguage);
+
+  const categoryOptions = buildCategoryOptions(languageCards, {
+    onlyUnmastered: wordMode === "new-only",
+    isMastered: (c) => getProgress(c.id, direction)?.mastered === true,
+    selected: category,
+  });
+
+  const categoryCards = filterByCategory(languageCards, category);
+  const categoryAvailable =
+    wordMode === "new-only"
+      ? categoryCards.filter((c) => !getProgress(c.id, direction)?.mastered)
+      : categoryCards;
+  const categorySelected = category !== ALL_CATEGORIES;
+  const categoryCleared =
+    categorySelected && categoryCards.length > 0 && categoryAvailable.length === 0;
+  const categoryTooSmall =
+    categorySelected &&
+    categoryAvailable.length > 0 &&
+    categoryAvailable.length < SENTENCE_MIN_WORDS;
+
   return (
     <main style={{ padding: "2rem", maxWidth: "600px", margin: "0 auto", background: "white", minHeight: "100vh", color: "#111" }}>
       <h1 style={{ marginBottom: "0.5rem" }}>💬 Sentence Listening</h1>
@@ -843,6 +886,12 @@ Output ONLY the JSON, no markdown, no explanation`;
         ))}
       </div>
 
+      <CategoryFilterSelect
+        value={category}
+        categories={categoryOptions}
+        onChange={setCategory}
+      />
+
       <p style={{ color: "#666", fontSize: "14px", marginBottom: "1.5rem" }}>
         Score: {score.correct} / {score.total}
         <span style={{ marginLeft: "12px", fontSize: "13px", color: "#4caf50" }}>
@@ -850,11 +899,26 @@ Output ONLY the JSON, no markdown, no explanation`;
         </span>
       </p>
 
-      {wordMode === "new-only" &&
-        cards.filter((c) => c.language === filterLanguage).length > 0 &&
-        cards
-          .filter((c) => c.language === filterLanguage)
-          .every((c) => getProgress(c.id, direction)?.mastered === true) && (
+      {categoryCleared && (
+        <CategoryNotice
+          tone="success"
+          title="🎉 You've mastered all words in this category!"
+          detail='Pick another category, or switch back to "All categories" to keep practising.'
+        />
+      )}
+
+      {categoryTooSmall && (
+        <CategoryNotice
+          tone="info"
+          title="Not enough words left here"
+          detail={`Sentences need at least ${SENTENCE_MIN_WORDS} words. Pick a bigger category, or switch to "All words".`}
+        />
+      )}
+
+      {!categorySelected &&
+        wordMode === "new-only" &&
+        languageCards.length > 0 &&
+        languageCards.every((c) => getProgress(c.id, direction)?.mastered === true) && (
         <div
           style={{
             background: "#e8f5e9",
