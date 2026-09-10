@@ -288,6 +288,14 @@ export default function ConversationLabPage() {
   const [graceRemainingMs, setGraceRemainingMs] = useState(0);
   const [recordingError, setRecordingError] = useState<string | null>(null);
 
+  // On-screen debug log (iPhone Safari has no visible console, so every
+  // meaningful checkpoint of the recording flow is logged here on screen).
+  const [debugLog, setDebugLog] = useState<string[]>([]);
+  const addDebugLog = useCallback((msg: string) => {
+    const t = new Date().toISOString().split("T")[1].replace("Z", "");
+    setDebugLog((prev) => [...prev.slice(-29), `${t} ${msg}`]);
+  }, []);
+
   const streamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -384,47 +392,74 @@ export default function ConversationLabPage() {
   const [unlockStatus, setUnlockStatus] = useState<"unknown" | "success" | "failed">("unknown");
   const hiddenAudioRef = useRef<HTMLAudioElement | null>(null);
 
+  // IMPORTANT: this must never block the caller. On some iOS Safari
+  // versions AudioContext.resume() can hang without ever resolving or
+  // rejecting; if the caller awaits this directly, the whole recording
+  // flow (getUserMedia etc.) would silently freeze with no error and no
+  // permission dialog. Callers must fire this WITHOUT awaiting it, and a
+  // timeout guard below ensures unlockStatus doesn't stay stuck forever.
   const tryUnlockAudio = useCallback(async () => {
+    addDebugLog("unlock: starting");
     try {
-      if (!audioCtxRef.current) {
-        const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-        audioCtxRef.current = new Ctx();
-      }
-      await audioCtxRef.current.resume();
-
-      // Classic "play a silent buffer" unlock hack
-      const buffer = audioCtxRef.current.createBuffer(1, 1, 22050);
-      const source = audioCtxRef.current.createBufferSource();
-      source.buffer = buffer;
-      source.connect(audioCtxRef.current.destination);
-      source.start(0);
-
-      // Also get autoplay permission for the <audio> element, within the same gesture
-      if (hiddenAudioRef.current) {
-        try {
-          await hiddenAudioRef.current.play();
-          hiddenAudioRef.current.pause();
-          hiddenAudioRef.current.currentTime = 0;
-        } catch {
-          // ignore; the AudioContext unlock result is what we report
+      const doUnlock = async () => {
+        if (!audioCtxRef.current) {
+          const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+          audioCtxRef.current = new Ctx();
         }
+        await audioCtxRef.current.resume();
+
+        // Classic "play a silent buffer" unlock hack
+        const buffer = audioCtxRef.current.createBuffer(1, 1, 22050);
+        const source = audioCtxRef.current.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioCtxRef.current.destination);
+        source.start(0);
+
+        // Also get autoplay permission for the <audio> element, within the same gesture
+        if (hiddenAudioRef.current) {
+          try {
+            await hiddenAudioRef.current.play();
+            hiddenAudioRef.current.pause();
+            hiddenAudioRef.current.currentTime = 0;
+          } catch {
+            // ignore; the AudioContext unlock result is what we report
+          }
+        }
+        return audioCtxRef.current.state === "running";
+      };
+
+      const timeout = new Promise<"timeout">((resolve) =>
+        window.setTimeout(() => resolve("timeout"), 2000)
+      );
+      const result = await Promise.race([doUnlock(), timeout]);
+
+      if (result === "timeout") {
+        addDebugLog("unlock: timed out after 2s (did not block recording)");
+        unlockedRef.current = false;
+        setUnlockStatus("failed");
+        return;
       }
 
-      const ok = audioCtxRef.current.state === "running";
-      unlockedRef.current = ok;
-      setUnlockStatus(ok ? "success" : "failed");
+      addDebugLog(`unlock: done (ok=${result})`);
+      unlockedRef.current = result;
+      setUnlockStatus(result ? "success" : "failed");
     } catch (e) {
+      addDebugLog(`unlock: threw ${e instanceof Error ? e.message : String(e)}`);
       console.error("unlock failed:", e);
       unlockedRef.current = false;
       setUnlockStatus("failed");
     }
-  }, []);
+  }, [addDebugLog]);
 
   const startRecording = useCallback(async () => {
+    addDebugLog("tap detected");
     setRecordingError(null);
 
-    // Always try iOS unlock on the first tap of the record button
-    await tryUnlockAudio();
+    // Fire the iOS unlock attempt WITHOUT awaiting it. It must never block
+    // getUserMedia below (see comment on tryUnlockAudio). This still runs
+    // synchronously up to its own first await, so it's still initiated
+    // within this click/touch gesture.
+    tryUnlockAudio();
 
     stoppedManuallyRef.current = false;
     setRecordedUrl(null);
@@ -435,11 +470,22 @@ export default function ConversationLabPage() {
 
     let stream: MediaStream;
     try {
+      addDebugLog("calling getUserMedia");
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true },
+        // "ideal" (not exact/hard) constraints: matches app/speaking/page.tsx's
+        // simple `{ audio: true }` approach as closely as possible while still
+        // asking for mono/16kHz when the browser is willing to honor it.
+        audio: {
+          channelCount: { ideal: 1 },
+          sampleRate: { ideal: 16000 },
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
       });
+      addDebugLog("getUserMedia resolved");
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
+      addDebugLog(`getUserMedia rejected: ${err.name}: ${err.message}`);
       setRecordingError(
         `❌ Could not access the microphone (${err.name}: ${err.message}). ` +
           `Allow microphone access in your browser settings, then tap again.`
@@ -458,11 +504,13 @@ export default function ConversationLabPage() {
 
     let recorder: MediaRecorder;
     try {
+      addDebugLog(`creating MediaRecorder (mimeType=${mimeType || "browser default"})`);
       recorder = mimeType
         ? new MediaRecorder(stream, { mimeType })
         : new MediaRecorder(stream);
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
+      addDebugLog(`MediaRecorder init failed: ${err.name}: ${err.message}`);
       setRecordingError(`❌ Failed to initialize MediaRecorder (${err.name}: ${err.message})`);
       stream.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
@@ -473,14 +521,16 @@ export default function ConversationLabPage() {
       if (e.data.size > 0) segmentsRef.current.push(e.data);
     };
     recorder.onerror = (e) => {
+      addDebugLog(`MediaRecorder onerror: ${String((e as ErrorEvent).error ?? e)}`);
       setRecordingError(`❌ Recording error: ${String((e as ErrorEvent).error ?? e)}`);
     };
     recorderRef.current = recorder;
     recorder.start();
+    addDebugLog("MediaRecorder started");
 
     setActualSettings(
       `MediaRecorder.mimeType (applied): ${recorder.mimeType || "(unknown)"}\n` +
-        `Requested: channelCount=1, sampleRate=16000\n` +
+        `Requested (ideal): channelCount=1, sampleRate=16000\n` +
         `track.getSettings(): ${JSON.stringify(settings, null, 2)}`
     );
 
@@ -493,8 +543,10 @@ export default function ConversationLabPage() {
       analyser.fftSize = 2048;
       source.connect(analyser);
       analyserRef.current = analyser;
+      addDebugLog("silence-detection AudioContext ready");
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
+      addDebugLog(`silence-detection AudioContext failed: ${err.name}: ${err.message}`);
       setRecordingError(
         `⚠️ Failed to initialize the AudioContext used for silence detection (${err.name}: ${err.message}). ` +
           `Recording will continue, but auto-stop won't work. Please stop manually.`
@@ -505,7 +557,7 @@ export default function ConversationLabPage() {
     lastSpeechAtRef.current = performance.now();
     setRecState("recording");
     rafRef.current = requestAnimationFrame(() => monitorLoopRef.current());
-  }, [tryUnlockAudio]);
+  }, [tryUnlockAudio, addDebugLog]);
 
   const stopManually = useCallback(() => {
     stoppedManuallyRef.current = true;
@@ -682,6 +734,10 @@ export default function ConversationLabPage() {
         <div style={row}>
           <button
             onClick={startRecording}
+            onTouchEnd={(e) => {
+              e.preventDefault();
+              startRecording();
+            }}
             disabled={recState === "recording" || recState === "grace"}
             style={{
               width: 100,
@@ -691,20 +747,41 @@ export default function ConversationLabPage() {
               color: "white",
               fontSize: 15,
               border: "none",
+              cursor: "pointer",
+              touchAction: "manipulation",
             }}
           >
             {recState === "recording" ? "Recording" : "Tap to record"}
           </button>
           {(recState === "recording" || recState === "grace") && (
-            <button onClick={stopManually} style={{ padding: "8px 16px" }}>
+            <button
+              onClick={stopManually}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                stopManually();
+              }}
+              style={{ padding: "8px 16px", cursor: "pointer", touchAction: "manipulation" }}
+            >
               Stop manually
             </button>
           )}
           {recState === "grace" && (
-            <button onClick={continueSpeaking} style={{ padding: "8px 16px", background: "#ffb300" }}>
+            <button
+              onClick={continueSpeaking}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                continueSpeaking();
+              }}
+              style={{ padding: "8px 16px", background: "#ffb300", cursor: "pointer", touchAction: "manipulation" }}
+            >
               Keep talking ({Math.ceil(graceRemainingMs / 100) / 10}s left)
             </button>
           )}
+        </div>
+
+        <div style={mono}>
+          <div style={{ fontWeight: "bold", marginBottom: 4 }}>Debug log (latest 30 entries):</div>
+          {debugLog.length === 0 ? "(no events yet — tap the record button)" : debugLog.join("\n")}
         </div>
 
         {recordingError && (
@@ -751,7 +828,14 @@ export default function ConversationLabPage() {
           Result: <b>{unlockStatus}</b>
         </p>
         <audio ref={hiddenAudioRef} src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=" />
-        <button onClick={testDelayedAutoplay} style={{ padding: "8px 16px" }}>
+        <button
+          onClick={testDelayedAutoplay}
+          onTouchEnd={(e) => {
+            e.preventDefault();
+            testDelayedAutoplay();
+          }}
+          style={{ padding: "8px 16px", cursor: "pointer", touchAction: "manipulation" }}
+        >
           After unlock, try playing without a gesture in 3s
         </button>
         <div style={mono}>{delayedPlayResult}</div>
