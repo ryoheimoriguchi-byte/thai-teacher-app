@@ -1,24 +1,29 @@
 "use client";
 
 /**
- * Step C1: 録音・音声再生の検証専用ページ。
+ * Step C1: verification-only page for recording + audio playback.
  *
- * 本番機能には一切つながない。ナビゲーションからリンクしない
- * （直接 URL を叩いたときだけ到達できる）。DB には書き込まない。
+ * NOT wired into any production feature. Not linked from navigation
+ * (reachable only via direct URL). No DB writes.
  *
- * 検証項目:
- *   1. 録音の自動停止（無音検出）
- *   2. iOS 音声アンロック
- *   3. TTS 3方式（Web Speech / OpenAI一括 / OpenAIストリーミング）比較
- *   4. speechSynthesis.getVoices() の一覧（日本語音声の有無）
- *   5. MediaRecorder の実際の設定値
+ * What this page verifies:
+ *   1. Auto-stop recording via silence detection
+ *   2. iOS audio unlock
+ *   3. TTS comparison across 3 methods (Web Speech / OpenAI bulk / OpenAI streaming)
+ *   4. speechSynthesis.getVoices() list (whether a Japanese voice exists)
+ *   5. Actual MediaRecorder settings applied
+ *
+ * NOTE: This page intentionally forces light mode (color-scheme: light +
+ * explicit background/text colors) regardless of the device's dark mode
+ * setting. This is a verification-only page, so theming is out of scope;
+ * this does NOT affect any other page's theme.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { speak } from "@/app/lib/tts";
 
 /* ------------------------------------------------------------------ */
-/* 共通スタイル（デザインに凝らない）                                    */
+/* Shared styles (no design polish intended)                          */
 /* ------------------------------------------------------------------ */
 
 const section: React.CSSProperties = {
@@ -26,6 +31,8 @@ const section: React.CSSProperties = {
   borderRadius: 8,
   padding: 16,
   marginBottom: 20,
+  background: "#ffffff",
+  color: "#111111",
 };
 const h2: React.CSSProperties = { fontSize: 16, fontWeight: "bold", marginBottom: 8 };
 const mono: React.CSSProperties = {
@@ -33,15 +40,17 @@ const mono: React.CSSProperties = {
   fontSize: 12,
   whiteSpace: "pre-wrap",
   background: "#f5f5f5",
+  color: "#111111",
   padding: 8,
   borderRadius: 4,
 };
 const row: React.CSSProperties = { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 };
 
 /* ------------------------------------------------------------------ */
-/* 1. 録音（無音検出による自動停止）                                     */
+/* 1. Recording (auto-stop via silence detection)                     */
 /* ------------------------------------------------------------------ */
 
+// TTS test phrases stay in Japanese on purpose (we're verifying Japanese audio).
 const SHORT_TEXT = "こんにちは！げんき？";
 const LONG_TEXT = "はい、りんご ふたつね。ほかには なにか いる？";
 
@@ -73,7 +82,7 @@ function measureWebSpeech(text: string): Promise<number> {
       }
     };
     requestAnimationFrame(poll);
-    // 念のためのタイムアウト
+    // Safety timeout
     window.setTimeout(() => resolve(-1), 8000);
   });
 }
@@ -95,7 +104,7 @@ async function measureBulk(text: string): Promise<number> {
   });
 }
 
-// PCM/WAV: raw サンプルを Web Audio API で順次スケジューリング再生（真のチャンク再生）
+// PCM/WAV: schedule raw samples via the Web Audio API as they arrive (true chunked playback)
 async function measureStreamingPcmLike(text: string, format: "pcm" | "wav"): Promise<number> {
   const t0 = performance.now();
   const res = await fetch("/api/conversation/tts", {
@@ -111,7 +120,7 @@ async function measureStreamingPcmLike(text: string, format: "pcm" | "wav"): Pro
   const ctx = new Ctx();
   let sampleRate = 24000;
   let numChannels = 1;
-  let headerSkipped = format === "pcm"; // pcmはヘッダ無し
+  let headerSkipped = format === "pcm"; // pcm has no header
   let leftover: Uint8Array = new Uint8Array(0);
   let nextStartTime = 0;
   let firstSoundMs: number | null = null;
@@ -123,7 +132,7 @@ async function measureStreamingPcmLike(text: string, format: "pcm" | "wav"): Pro
     let chunk: Uint8Array = value;
 
     if (!headerSkipped) {
-      // WAV: 先頭44バイトの標準 PCM ヘッダをパースしてスキップ
+      // WAV: parse and skip the standard 44-byte PCM header
       leftover = concatBytes(leftover, chunk);
       if (leftover.length < 44) continue;
       const view = new DataView(leftover.buffer, leftover.byteOffset, leftover.byteLength);
@@ -137,7 +146,7 @@ async function measureStreamingPcmLike(text: string, format: "pcm" | "wav"): Pro
       leftover = new Uint8Array(0);
     }
 
-    // 16bit PCM は 2 バイト単位。奇数バイトが余ったら次回に持ち越す
+    // 16-bit PCM comes in 2-byte units; carry over an odd trailing byte to the next chunk
     const usableLength = chunk.length - (chunk.length % 2);
     if (usableLength <= 0) {
       leftover = chunk;
@@ -162,7 +171,7 @@ async function measureStreamingPcmLike(text: string, format: "pcm" | "wav"): Pro
     source.buffer = audioBuffer;
     source.connect(ctx.destination);
     if (nextStartTime === 0) {
-      nextStartTime = ctx.currentTime + 0.03; // わずかな先読みマージン
+      nextStartTime = ctx.currentTime + 0.03; // small lookahead margin
       firstSoundMs = performance.now() - t0;
     }
     source.start(nextStartTime);
@@ -172,7 +181,8 @@ async function measureStreamingPcmLike(text: string, format: "pcm" | "wav"): Pro
   return firstSoundMs ?? -1;
 }
 
-// MP3ストリーミング: MediaSource が使えれば真の逐次再生、使えなければ全受信後に再生（その旨を明記）
+// MP3 streaming: true incremental playback via MediaSource if supported, otherwise
+// fall back to buffering the full response before playback (and label it as such).
 async function measureStreamingMp3(text: string): Promise<{ ms: number; note: string }> {
   const t0 = performance.now();
   const mseSupported =
@@ -186,7 +196,7 @@ async function measureStreamingMp3(text: string): Promise<{ ms: number; note: st
   if (!res.body) return { ms: -1, note: "no body" };
 
   if (!mseSupported) {
-    // フォールバック: 全部読み切ってから再生（本当のストリーミングではない）
+    // Fallback: read everything, then play (not true streaming)
     const reader = res.body.getReader();
     const chunks: BlobPart[] = [];
     while (true) {
@@ -202,7 +212,7 @@ async function measureStreamingMp3(text: string): Promise<{ ms: number; note: st
       audio.onerror = () => resolve(-1);
       audio.play().catch(() => resolve(-1));
     });
-    return { ms, note: "MSE非対応のため全受信後に再生（真のストリーミングではない）" };
+    return { ms, note: "MSE unsupported, played after full download (not true streaming)" };
   }
 
   return await new Promise((resolve) => {
@@ -213,13 +223,13 @@ async function measureStreamingMp3(text: string): Promise<{ ms: number; note: st
     audio.onplaying = () => {
       if (!resolved) {
         resolved = true;
-        resolve({ ms: performance.now() - t0, note: "MediaSourceで逐次appendしながら再生" });
+        resolve({ ms: performance.now() - t0, note: "played via MediaSource, appending chunks incrementally" });
       }
     };
     audio.onerror = () => {
       if (!resolved) {
         resolved = true;
-        resolve({ ms: -1, note: "MediaSource再生エラー" });
+        resolve({ ms: -1, note: "MediaSource playback error" });
       }
     };
     mediaSource.addEventListener("sourceopen", async () => {
@@ -259,11 +269,11 @@ function pickMimeType(): string {
       return c;
     }
   }
-  return ""; // ブラウザ既定に任せる
+  return ""; // let the browser pick its default
 }
 
 export default function ConversationLabPage() {
-  /* ---------------- 録音 ---------------- */
+  /* ---------------- Recording ---------------- */
   const [silenceThreshold, setSilenceThreshold] = useState(0.02);
   const [silenceDurationMs, setSilenceDurationMs] = useState(2500);
   const [minRecordingMs, setMinRecordingMs] = useState(500);
@@ -274,7 +284,7 @@ export default function ConversationLabPage() {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [silenceMs, setSilenceMs] = useState(0);
   const [recordedUrl, setRecordedUrl] = useState<string | null>(null);
-  const [actualSettings, setActualSettings] = useState<string>("(未取得)");
+  const [actualSettings, setActualSettings] = useState<string>("(not captured yet)");
   const [graceRemainingMs, setGraceRemainingMs] = useState(0);
   const [recordingError, setRecordingError] = useState<string | null>(null);
 
@@ -311,7 +321,7 @@ export default function ConversationLabPage() {
           setGraceRemainingMs(Math.max(0, remaining));
           if (remaining <= 0) {
             if (graceTimerRef.current) window.clearInterval(graceTimerRef.current);
-            // grace 期間終了 → 本当に確定
+            // grace period elapsed -> actually finalize now
             const blob = new Blob(segmentsRef.current, { type: mimeTypeRef.current || "audio/webm" });
             setRecordedUrl(URL.createObjectURL(blob));
             setRecState("stopped");
@@ -382,21 +392,21 @@ export default function ConversationLabPage() {
       }
       await audioCtxRef.current.resume();
 
-      // 無音バッファを再生する古典的な unlock ハック
+      // Classic "play a silent buffer" unlock hack
       const buffer = audioCtxRef.current.createBuffer(1, 1, 22050);
       const source = audioCtxRef.current.createBufferSource();
       source.buffer = buffer;
       source.connect(audioCtxRef.current.destination);
       source.start(0);
 
-      // <audio> 要素側の自動再生許可も同じジェスチャー内で得る
+      // Also get autoplay permission for the <audio> element, within the same gesture
       if (hiddenAudioRef.current) {
         try {
           await hiddenAudioRef.current.play();
           hiddenAudioRef.current.pause();
           hiddenAudioRef.current.currentTime = 0;
         } catch {
-          // 無視。AudioContext 側の unlock 結果を優先して判定する
+          // ignore; the AudioContext unlock result is what we report
         }
       }
 
@@ -413,7 +423,7 @@ export default function ConversationLabPage() {
   const startRecording = useCallback(async () => {
     setRecordingError(null);
 
-    // iOS unlock は録音ボタンの最初のタップで必ず実行する
+    // Always try iOS unlock on the first tap of the record button
     await tryUnlockAudio();
 
     stoppedManuallyRef.current = false;
@@ -431,8 +441,8 @@ export default function ConversationLabPage() {
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
       setRecordingError(
-        `❌ マイクにアクセスできませんでした（${err.name}: ${err.message}）。` +
-          `ブラウザの設定でマイク権限を許可してから、もう一度タップしてください。`
+        `❌ Could not access the microphone (${err.name}: ${err.message}). ` +
+          `Allow microphone access in your browser settings, then tap again.`
       );
       setRecState("idle");
       return;
@@ -453,7 +463,7 @@ export default function ConversationLabPage() {
         : new MediaRecorder(stream);
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
-      setRecordingError(`❌ MediaRecorder の初期化に失敗しました（${err.name}: ${err.message}）`);
+      setRecordingError(`❌ Failed to initialize MediaRecorder (${err.name}: ${err.message})`);
       stream.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
       setRecState("idle");
@@ -463,14 +473,14 @@ export default function ConversationLabPage() {
       if (e.data.size > 0) segmentsRef.current.push(e.data);
     };
     recorder.onerror = (e) => {
-      setRecordingError(`❌ 録音中にエラーが発生しました: ${String((e as ErrorEvent).error ?? e)}`);
+      setRecordingError(`❌ Recording error: ${String((e as ErrorEvent).error ?? e)}`);
     };
     recorderRef.current = recorder;
     recorder.start();
 
     setActualSettings(
-      `MediaRecorder.mimeType(適用): ${recorder.mimeType || "(不明)"}\n` +
-        `要求: channelCount=1, sampleRate=16000\n` +
+      `MediaRecorder.mimeType (applied): ${recorder.mimeType || "(unknown)"}\n` +
+        `Requested: channelCount=1, sampleRate=16000\n` +
         `track.getSettings(): ${JSON.stringify(settings, null, 2)}`
     );
 
@@ -486,8 +496,8 @@ export default function ConversationLabPage() {
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
       setRecordingError(
-        `⚠️ 無音検出用の AudioContext 初期化に失敗しました（${err.name}: ${err.message}）。` +
-          `録音自体は続行されますが、自動停止は機能しません。手動で停止してください。`
+        `⚠️ Failed to initialize the AudioContext used for silence detection (${err.name}: ${err.message}). ` +
+          `Recording will continue, but auto-stop won't work. Please stop manually.`
       );
     }
 
@@ -516,7 +526,7 @@ export default function ConversationLabPage() {
     recorderRef.current = recorder;
     recorder.start();
 
-    hasSpokenOnceRef.current = false; // 続きの発話でもう一度「発話検出→無音判定」からやり直す
+    hasSpokenOnceRef.current = false; // start the speak->silence detection over for the continuation
     setHasSpokenOnce(false);
     recordingStartAtRef.current = performance.now();
     lastSpeechAtRef.current = performance.now();
@@ -532,27 +542,27 @@ export default function ConversationLabPage() {
     };
   }, []);
 
-  /* ---------------- iOS unlock: 遅延再生テスト ---------------- */
-  const [delayedPlayResult, setDelayedPlayResult] = useState<string>("(未実行)");
+  /* ---------------- iOS unlock: delayed playback test ---------------- */
+  const [delayedPlayResult, setDelayedPlayResult] = useState<string>("(not run yet)");
   const testDelayedAutoplay = useCallback(() => {
-    setDelayedPlayResult("3秒後に再生を試みます…（この間ボタン等は押さないでください）");
+    setDelayedPlayResult("Trying to play in 3 seconds… (don't tap anything during this time)");
     window.setTimeout(async () => {
       try {
-        // ここでの play() 呼び出しはユーザー操作を伴わない（setTimeout経由）
+        // This play() call is NOT triggered by a user gesture (it's from setTimeout)
         const audio = new Audio(
           "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="
         );
         await audio.play();
-        setDelayedPlayResult("✅ 成功: ユーザー操作なしで再生できた（unlock有効）");
+        setDelayedPlayResult("✅ Success: played without a user gesture (unlock is working)");
       } catch (e) {
         setDelayedPlayResult(
-          `❌ 失敗: ${e instanceof Error ? e.message : String(e)}（unlockが効いていない/ブラウザに拒否された）`
+          `❌ Failed: ${e instanceof Error ? e.message : String(e)} (unlock isn't working / browser blocked it)`
         );
       }
     }, 3000);
   }, []);
 
-  /* ---------------- 2. TTS 3方式比較 ---------------- */
+  /* ---------------- 3. TTS comparison across 3 methods ---------------- */
   type TtsResult = { method: string; format: string; text: string; ms: number };
   const [ttsResults, setTtsResults] = useState<TtsResult[]>([]);
   const [ttsRunning, setTtsRunning] = useState(false);
@@ -562,8 +572,8 @@ export default function ConversationLabPage() {
     setTtsRunning(true);
     const results: TtsResult[] = [];
     const texts: { label: string; text: string }[] = [
-      { label: "短い", text: SHORT_TEXT },
-      { label: "長め", text: LONG_TEXT },
+      { label: "short", text: SHORT_TEXT },
+      { label: "long", text: LONG_TEXT },
     ];
 
     for (const { label, text } of texts) {
@@ -575,15 +585,15 @@ export default function ConversationLabPage() {
       }
       for (let i = 0; i < 5; i++) {
         const ms = await measureBulk(text);
-        results.push({ method: "B. OpenAI一括", format: "mp3", text: label, ms });
+        results.push({ method: "B. OpenAI bulk", format: "mp3", text: label, ms });
       }
       for (let i = 0; i < 5; i++) {
         if (streamFormat === "mp3") {
           const { ms, note } = await measureStreamingMp3(text);
-          results.push({ method: `C. ストリーミング (${note})`, format: "mp3", text: label, ms });
+          results.push({ method: `C. Streaming (${note})`, format: "mp3", text: label, ms });
         } else {
           const ms = await measureStreamingPcmLike(text, streamFormat);
-          results.push({ method: "C. ストリーミング", format: streamFormat, text: label, ms });
+          results.push({ method: "C. Streaming", format: streamFormat, text: label, ms });
         }
       }
       setTtsResults([...results]);
@@ -591,7 +601,7 @@ export default function ConversationLabPage() {
     setTtsRunning(false);
   };
 
-  /* ---------------- 4. 音声一覧 ---------------- */
+  /* ---------------- 4. Voice list ---------------- */
   type VoiceInfo = { name: string; lang: string; localService: boolean };
   const [voices, setVoices] = useState<VoiceInfo[]>([]);
   useEffect(() => {
@@ -603,7 +613,7 @@ export default function ConversationLabPage() {
     };
     load();
     window.speechSynthesis.onvoiceschanged = load;
-    // 一部ブラウザは onvoiceschanged が発火しないことがあるためポーリングも併用
+    // Some browsers never fire onvoiceschanged, so also poll for a while
     const interval = window.setInterval(load, 1000);
     window.setTimeout(() => window.clearInterval(interval), 5000);
     return () => {
@@ -614,19 +624,29 @@ export default function ConversationLabPage() {
 
   /* ------------------------------------------------------------------ */
   return (
-    <div style={{ maxWidth: 720, margin: "0 auto", padding: 16, color: "#111" }}>
-      <h1 style={{ fontSize: 20, marginBottom: 4 }}>Conversation Lab（検証専用・非公開）</h1>
+    <div
+      style={{
+        maxWidth: 720,
+        margin: "0 auto",
+        padding: 16,
+        color: "#111111",
+        background: "#ffffff",
+        minHeight: "100vh",
+        colorScheme: "light",
+      }}
+    >
+      <h1 style={{ fontSize: 20, marginBottom: 4 }}>Conversation Lab (verification only, not public)</h1>
       <p style={{ fontSize: 12, color: "#888", marginBottom: 20 }}>
-        本番機能には接続していません。DBへの書き込みもありません。
+        Not connected to any production feature. No DB writes.
       </p>
 
-      {/* ---------------- 1. 録音 ---------------- */}
+      {/* ---------------- 1. Recording ---------------- */}
       <div style={section}>
-        <div style={h2}>1. 録音（無音検出で自動停止）</div>
+        <div style={h2}>1. Recording (auto-stop on silence)</div>
 
         <div style={row}>
           <label>
-            無音判定の閾値(RMS): {silenceThreshold.toFixed(3)}
+            Silence threshold (RMS): {silenceThreshold.toFixed(3)}
             <input
               type="range"
               min={0.002}
@@ -640,7 +660,7 @@ export default function ConversationLabPage() {
         </div>
         <div style={row}>
           <label>
-            無音継続で停止(ms):
+            Silence duration to stop (ms):
             <input
               type="number"
               value={silenceDurationMs}
@@ -649,7 +669,7 @@ export default function ConversationLabPage() {
             />
           </label>
           <label>
-            最低録音時間(ms):
+            Minimum recording (ms):
             <input
               type="number"
               value={minRecordingMs}
@@ -669,20 +689,20 @@ export default function ConversationLabPage() {
               borderRadius: "50%",
               background: recState === "recording" ? "#e53935" : "#4caf50",
               color: "white",
-              fontSize: 16,
+              fontSize: 15,
               border: "none",
             }}
           >
-            {recState === "recording" ? "録音中" : "タップで\n録音開始"}
+            {recState === "recording" ? "Recording" : "Tap to record"}
           </button>
           {(recState === "recording" || recState === "grace") && (
             <button onClick={stopManually} style={{ padding: "8px 16px" }}>
-              手動で停止
+              Stop manually
             </button>
           )}
           {recState === "grace" && (
             <button onClick={continueSpeaking} style={{ padding: "8px 16px", background: "#ffb300" }}>
-              まだ はなす（残り{Math.ceil(graceRemainingMs / 100) / 10}秒）
+              Keep talking ({Math.ceil(graceRemainingMs / 100) / 10}s left)
             </button>
           )}
         </div>
@@ -712,69 +732,69 @@ export default function ConversationLabPage() {
 
         {recordedUrl && (
           <div style={{ marginTop: 8 }}>
-            <div>録音結果の再生:</div>
+            <div>Recorded audio playback:</div>
             <audio controls src={recordedUrl} />
           </div>
         )}
 
         <div style={{ marginTop: 8 }}>
-          <div>MediaRecorder / トラックの実際の設定値:</div>
+          <div>Actual MediaRecorder / track settings:</div>
           <div style={mono}>{actualSettings}</div>
         </div>
       </div>
 
       {/* ---------------- 2. iOS unlock ---------------- */}
       <div style={section}>
-        <div style={h2}>2. iOS 音声アンロック</div>
+        <div style={h2}>2. iOS audio unlock</div>
         <p style={{ fontSize: 12 }}>
-          録音ボタン（上のセクション）の最初のタップで自動的に unlock を試みています。
-          結果: <b>{unlockStatus}</b>
+          The first tap on the record button (section above) automatically attempts an unlock.
+          Result: <b>{unlockStatus}</b>
         </p>
         <audio ref={hiddenAudioRef} src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=" />
         <button onClick={testDelayedAutoplay} style={{ padding: "8px 16px" }}>
-          unlock後・3秒後にユーザー操作なしで再生を試す
+          After unlock, try playing without a gesture in 3s
         </button>
         <div style={mono}>{delayedPlayResult}</div>
       </div>
 
-      {/* ---------------- 3. TTS比較 ---------------- */}
+      {/* ---------------- 3. TTS comparison ---------------- */}
       <div style={section}>
-        <div style={h2}>3. TTS 3方式比較（各5回×2テキスト）</div>
+        <div style={h2}>3. TTS comparison across 3 methods (5 runs x 2 texts)</div>
         <div style={row}>
           <label>
-            ストリーミング方式のフォーマット:
+            Streaming format:
             <select
               value={streamFormat}
               onChange={(e) => setStreamFormat(e.target.value as "pcm" | "wav" | "mp3")}
               style={{ marginLeft: 8 }}
             >
-              <option value="pcm">pcm（推奨）</option>
+              <option value="pcm">pcm (recommended)</option>
               <option value="wav">wav</option>
-              <option value="mp3">mp3（MediaSource、非対応ならフォールバック）</option>
+              <option value="mp3">mp3 (MediaSource, falls back if unsupported)</option>
             </select>
           </label>
           <button onClick={runTtsComparison} disabled={ttsRunning} style={{ padding: "8px 16px" }}>
-            {ttsRunning ? "計測中..." : "3方式を計測開始"}
+            {ttsRunning ? "Running..." : "Run comparison"}
           </button>
         </div>
         <div style={mono}>
           {ttsResults.length === 0
-            ? "(未実行)"
+            ? "(not run yet)"
             : ttsResults
                 .map((r) => `${r.method.padEnd(10)} [${r.format}] ${r.text}: ${r.ms.toFixed(0)}ms`)
                 .join("\n")}
         </div>
       </div>
 
-      {/* ---------------- 4. 音声一覧 ---------------- */}
+      {/* ---------------- 4. Voice list ---------------- */}
       <div style={section}>
-        <div style={h2}>4. speechSynthesis.getVoices() 一覧</div>
+        <div style={h2}>4. speechSynthesis.getVoices() list</div>
         <p style={{ fontWeight: "bold", color: jaVoices.length > 0 ? "green" : "red", fontSize: 16 }}>
-          日本語音声(lang starts with &quot;ja&quot;): {jaVoices.length} 件
+          Japanese voices (lang starts with &quot;ja&quot;): {jaVoices.length}
         </p>
         <div style={mono}>
           {voices.length === 0
-            ? "(読み込み中... 0件のままなら本当に無い可能性があります)"
+            ? "(loading... if this stays at 0, there may genuinely be none)"
             : voices
                 .map((v) => `${v.lang.padEnd(8)} ${v.name}  localService=${v.localService}`)
                 .join("\n")}
