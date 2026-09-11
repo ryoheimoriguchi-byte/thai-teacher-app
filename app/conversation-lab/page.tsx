@@ -392,59 +392,70 @@ export default function ConversationLabPage() {
   const [unlockStatus, setUnlockStatus] = useState<"unknown" | "success" | "failed">("unknown");
   const hiddenAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // IMPORTANT: this must never block the caller. On some iOS Safari
-  // versions AudioContext.resume() can hang without ever resolving or
-  // rejecting; if the caller awaits this directly, the whole recording
-  // flow (getUserMedia etc.) would silently freeze with no error and no
-  // permission dialog. Callers must fire this WITHOUT awaiting it, and a
-  // timeout guard below ensures unlockStatus doesn't stay stuck forever.
-  const tryUnlockAudio = useCallback(async () => {
-    addDebugLog("unlock: starting");
+  // IMPORTANT: this must never block the caller. This is a plain
+  // (non-async-awaited) function: the AudioContext creation, resume()
+  // call, and silent-buffer playback happen synchronously, as the very
+  // first thing that runs in the tap gesture, BEFORE any await — this is
+  // the classic iOS unlock requirement. We only start awaiting things
+  // (with a timeout guard) after those synchronous calls have already
+  // been dispatched, so a hang can never block getUserMedia downstream.
+  const tryUnlockAudio = useCallback(() => {
+    addDebugLog("unlock: starting (sync)");
     try {
-      const doUnlock = async () => {
-        if (!audioCtxRef.current) {
-          const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-          audioCtxRef.current = new Ctx();
-        }
-        await audioCtxRef.current.resume();
+      if (!audioCtxRef.current) {
+        const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        audioCtxRef.current = new Ctx();
+      }
+      const ctx = audioCtxRef.current;
 
-        // Classic "play a silent buffer" unlock hack
-        const buffer = audioCtxRef.current.createBuffer(1, 1, 22050);
-        const source = audioCtxRef.current.createBufferSource();
-        source.buffer = buffer;
-        source.connect(audioCtxRef.current.destination);
-        source.start(0);
+      // Fire resume() without awaiting it yet (still invoked synchronously in the gesture)
+      const resumePromise = ctx.resume();
 
-        // Also get autoplay permission for the <audio> element, within the same gesture
-        if (hiddenAudioRef.current) {
-          try {
-            await hiddenAudioRef.current.play();
-            hiddenAudioRef.current.pause();
-            hiddenAudioRef.current.currentTime = 0;
-          } catch {
+      // Classic "play a silent buffer" unlock hack — also synchronous, no await before this
+      const buffer = ctx.createBuffer(1, 1, 22050);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start(0);
+
+      // Also get autoplay permission for the <audio> element, within the same gesture
+      if (hiddenAudioRef.current) {
+        hiddenAudioRef.current
+          .play()
+          .then(() => {
+            hiddenAudioRef.current?.pause();
+            if (hiddenAudioRef.current) hiddenAudioRef.current.currentTime = 0;
+          })
+          .catch(() => {
             // ignore; the AudioContext unlock result is what we report
-          }
-        }
-        return audioCtxRef.current.state === "running";
-      };
+          });
+      }
 
+      // From here on we're just observing the result; everything critical
+      // for the gesture has already been dispatched above.
       const timeout = new Promise<"timeout">((resolve) =>
         window.setTimeout(() => resolve("timeout"), 2000)
       );
-      const result = await Promise.race([doUnlock(), timeout]);
-
-      if (result === "timeout") {
-        addDebugLog("unlock: timed out after 2s (did not block recording)");
-        unlockedRef.current = false;
-        setUnlockStatus("failed");
-        return;
-      }
-
-      addDebugLog(`unlock: done (ok=${result})`);
-      unlockedRef.current = result;
-      setUnlockStatus(result ? "success" : "failed");
+      Promise.race([resumePromise.then(() => "resumed" as const), timeout])
+        .then((result) => {
+          if (result === "timeout") {
+            addDebugLog("unlock: timed out after 2s (did not block recording)");
+            unlockedRef.current = false;
+            setUnlockStatus("failed");
+            return;
+          }
+          const ok = ctx.state === "running";
+          addDebugLog(`unlock: done (ok=${ok})`);
+          unlockedRef.current = ok;
+          setUnlockStatus(ok ? "success" : "failed");
+        })
+        .catch((e) => {
+          addDebugLog(`unlock: resume() rejected: ${e instanceof Error ? e.message : String(e)}`);
+          unlockedRef.current = false;
+          setUnlockStatus("failed");
+        });
     } catch (e) {
-      addDebugLog(`unlock: threw ${e instanceof Error ? e.message : String(e)}`);
+      addDebugLog(`unlock: threw sync: ${e instanceof Error ? e.message : String(e)}`);
       console.error("unlock failed:", e);
       unlockedRef.current = false;
       setUnlockStatus("failed");
@@ -611,6 +622,43 @@ export default function ConversationLabPage() {
           `❌ Failed: ${e instanceof Error ? e.message : String(e)} (unlock isn't working / browser blocked it)`
         );
       }
+    }, 3000);
+  }, []);
+
+  /* ---------------- iOS unlock: delayed Web Speech test ---------------- */
+  // Separate code path from AudioContext/<audio> above: speechSynthesis is a
+  // different API and may have different autoplay rules on iOS Safari.
+  const [delayedSpeechResult, setDelayedSpeechResult] = useState<string>("(not run yet)");
+  const testDelayedSpeech = useCallback(() => {
+    setDelayedSpeechResult("Tap registered. Waiting 3 seconds, then speaking without a gesture…");
+    window.setTimeout(() => {
+      let settled = false;
+
+      // This speak() call is NOT triggered by a user gesture (it's from setTimeout).
+      const utterance = new SpeechSynthesisUtterance(SHORT_TEXT);
+      utterance.lang = "ja-JP";
+      const jaVoice = window.speechSynthesis.getVoices().find((v) => v.lang.toLowerCase().startsWith("ja"));
+      if (jaVoice) utterance.voice = jaVoice;
+
+      utterance.onstart = () => {
+        if (settled) return;
+        settled = true;
+        setDelayedSpeechResult("✅ Success: onstart fired without a user gesture (Web Speech autoplay works)");
+      };
+      utterance.onerror = (e) => {
+        if (settled) return;
+        settled = true;
+        setDelayedSpeechResult(`❌ Failed: onerror fired (${e.error ?? "unknown error"})`);
+      };
+
+      window.speechSynthesis.speak(utterance);
+
+      window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        window.speechSynthesis.cancel();
+        setDelayedSpeechResult("⏱️ Timeout: onstart never fired within 5s (likely silently blocked)");
+      }, 5000);
     }, 3000);
   }, []);
 
@@ -839,6 +887,23 @@ export default function ConversationLabPage() {
           After unlock, try playing without a gesture in 3s
         </button>
         <div style={mono}>{delayedPlayResult}</div>
+
+        <div style={{ marginTop: 16, borderTop: "1px dashed #ccc", paddingTop: 12 }}>
+          <div style={{ fontWeight: "bold", marginBottom: 4 }}>
+            Web Speech (speechSynthesis) autoplay test — separate from AudioContext above
+          </div>
+          <button
+            onClick={testDelayedSpeech}
+            onTouchEnd={(e) => {
+              e.preventDefault();
+              testDelayedSpeech();
+            }}
+            style={{ padding: "8px 16px", cursor: "pointer", touchAction: "manipulation" }}
+          >
+            Tap, wait 3s, then speak without a gesture
+          </button>
+          <div style={mono}>{delayedSpeechResult}</div>
+        </div>
       </div>
 
       {/* ---------------- 3. TTS comparison ---------------- */}
