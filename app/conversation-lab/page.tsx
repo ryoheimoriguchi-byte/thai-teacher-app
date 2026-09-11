@@ -104,8 +104,17 @@ async function measureBulk(text: string): Promise<number> {
   });
 }
 
-// PCM/WAV: schedule raw samples via the Web Audio API as they arrive (true chunked playback)
-async function measureStreamingPcmLike(text: string, format: "pcm" | "wav"): Promise<number> {
+// PCM/WAV: schedule raw samples via the Web Audio API as they arrive (true chunked playback).
+// If `externalCtx` is provided, samples are scheduled onto that ALREADY-RUNNING context
+// instead of creating a new one — this is what the "continuous playback" test (section 2)
+// uses to verify whether audio can be appended to a context whose playback started during
+// an earlier user gesture, without issuing any new play()/resume() call.
+async function measureStreamingPcmLike(
+  text: string,
+  format: "pcm" | "wav",
+  externalCtx?: AudioContext,
+  extraDestination?: AudioNode
+): Promise<number> {
   const t0 = performance.now();
   const res = await fetch("/api/conversation/tts", {
     method: "POST",
@@ -117,7 +126,7 @@ async function measureStreamingPcmLike(text: string, format: "pcm" | "wav"): Pro
   const Ctx =
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-  const ctx = new Ctx();
+  const ctx = externalCtx ?? new Ctx();
   let sampleRate = 24000;
   let numChannels = 1;
   let headerSkipped = format === "pcm"; // pcm has no header
@@ -170,8 +179,11 @@ async function measureStreamingPcmLike(text: string, format: "pcm" | "wav"): Pro
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(ctx.destination);
+    if (extraDestination) source.connect(extraDestination);
     if (nextStartTime === 0) {
-      nextStartTime = ctx.currentTime + 0.03; // small lookahead margin
+      // When appending to an already-running context, start relative to "now"
+      // (no artificial silence gap is needed since playback never stopped).
+      nextStartTime = ctx.currentTime + (externalCtx ? 0.01 : 0.03);
       firstSoundMs = performance.now() - t0;
     }
     source.start(nextStartTime);
@@ -662,6 +674,119 @@ export default function ConversationLabPage() {
     }, 3000);
   }, []);
 
+  /* ---------------- iOS unlock: continuous-playback ("keep it running,       */
+  /* append data later") test — the leading candidate strategy for C2         */
+  const [continuousTestResult, setContinuousTestResult] = useState<string>("(not run yet)");
+  const [continuousTestRunning, setContinuousTestRunning] = useState(false);
+  const [continuousLoopActive, setContinuousLoopActive] = useState(false);
+  const continuousCtxRef = useRef<AudioContext | null>(null);
+  const continuousLoopSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const continuousAnalyserRef = useRef<AnalyserNode | null>(null);
+
+  const stopContinuousLoop = useCallback(() => {
+    try {
+      continuousLoopSourceRef.current?.stop();
+    } catch {
+      // already stopped
+    }
+    continuousLoopSourceRef.current = null;
+    continuousCtxRef.current?.close().catch(() => {});
+    continuousCtxRef.current = null;
+    continuousAnalyserRef.current = null;
+    setContinuousLoopActive(false);
+  }, []);
+
+  const startContinuousPlaybackTest = useCallback(() => {
+    setContinuousTestRunning(true);
+    setContinuousLoopActive(true);
+    setContinuousTestResult(
+      "Tap registered. Starting a continuous near-silent loop synchronously (not stopping it)…"
+    );
+    addDebugLog("continuous-test: tap detected");
+
+    // Steps 1-2: synchronously (same tap gesture) create the context and start a
+    // looping near-silent buffer. We deliberately never call play()/resume() again
+    // after this — playback is kept "running" the whole time.
+    const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const ctx = new Ctx();
+    continuousCtxRef.current = ctx;
+    ctx.resume().catch(() => {});
+
+    const loopSeconds = 2;
+    const sr = ctx.sampleRate;
+    const silentBuffer = ctx.createBuffer(1, sr * loopSeconds, sr);
+    const channelData = silentBuffer.getChannelData(0);
+    // Very low amplitude noise (not literal digital zero) — inaudible to a human ear,
+    // but avoids some platforms' "output is pure silence" auto-suspend heuristics.
+    for (let i = 0; i < channelData.length; i++) {
+      channelData[i] = (Math.random() * 2 - 1) * 0.0005;
+    }
+    const loopSource = ctx.createBufferSource();
+    loopSource.buffer = silentBuffer;
+    loopSource.loop = true;
+    loopSource.connect(ctx.destination);
+    loopSource.start(0);
+    continuousLoopSourceRef.current = loopSource;
+
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    continuousAnalyserRef.current = analyser;
+
+    addDebugLog(`continuous-test: silent loop started, ctx.state=${ctx.state}`);
+
+    // Step 3: wait 3s.
+    window.setTimeout(async () => {
+      setContinuousTestResult(
+        (prev) =>
+          `${prev}\n3s elapsed (ctx.state=${ctx.state}). Scheduling real TTS audio onto the SAME ` +
+          `running context now — no new play()/resume() call is made.`
+      );
+      addDebugLog(`continuous-test: 3s elapsed, ctx.state=${ctx.state}`);
+
+      try {
+        // Step 4: append real audio to the already-running context via the existing
+        // pcm streaming path, reused as-is (same route as production would use).
+        const firstMs = await measureStreamingPcmLike(LONG_TEXT, "pcm", ctx, analyser);
+        addDebugLog(`continuous-test: scheduled ok, firstMs=${firstMs}, ctx.state=${ctx.state}`);
+
+        // Step 5: objectively check whether non-silent audio actually flowed through
+        // the graph (in addition to asking the human tester to confirm by ear).
+        let maxRms = 0;
+        const pollUntilMs = performance.now() + 3500;
+        const buf = new Uint8Array(analyser.fftSize);
+        while (performance.now() < pollUntilMs) {
+          analyser.getByteTimeDomainData(buf);
+          const rms = computeRms(buf);
+          if (rms > maxRms) maxRms = rms;
+          await new Promise((r) => window.setTimeout(r, 50));
+        }
+
+        const heard = maxRms > 0.01; // real speech should sit well above this
+        addDebugLog(`continuous-test: maxRms=${maxRms.toFixed(4)}, heard=${heard}`);
+        setContinuousTestResult(
+          (prev) =>
+            `${prev}\n${heard ? "✅" : "❌"} ${
+              heard ? "Audio graph shows real signal" : "No signal detected in the audio graph"
+            } (maxRms=${maxRms.toFixed(4)}, first buffer scheduled at ${firstMs.toFixed(0)}ms, ` +
+            `ctx.state=${ctx.state}).\nPlease confirm with your own ears whether you actually HEARD: "${LONG_TEXT}"\n` +
+            `(the loop is still running silently in the background — tap "Stop loop" below when done).`
+        );
+      } catch (e) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        addDebugLog(`continuous-test: threw ${err.name}: ${err.message}`);
+        setContinuousTestResult((prev) => `${prev}\n❌ Error while scheduling: ${err.name}: ${err.message}`);
+      } finally {
+        setContinuousTestRunning(false);
+      }
+    }, 3000);
+  }, [addDebugLog]);
+
+  useEffect(() => {
+    return () => {
+      stopContinuousLoop();
+    };
+  }, [stopContinuousLoop]);
+
   /* ---------------- 3. TTS comparison across 3 methods ---------------- */
   type TtsResult = { method: string; format: string; text: string; ms: number };
   const [ttsResults, setTtsResults] = useState<TtsResult[]>([]);
@@ -903,6 +1028,42 @@ export default function ConversationLabPage() {
             Tap, wait 3s, then speak without a gesture
           </button>
           <div style={mono}>{delayedSpeechResult}</div>
+        </div>
+
+        <div style={{ marginTop: 16, borderTop: "1px dashed #ccc", paddingTop: 12 }}>
+          <div style={{ fontWeight: "bold", marginBottom: 4 }}>
+            Continuous-playback test (leading candidate strategy for C2)
+          </div>
+          <p style={{ fontSize: 12, marginBottom: 8 }}>
+            Tap once → a near-silent loop starts and keeps playing (never stopped) → after 3s,
+            real TTS audio is appended to that SAME running context, with no new play()/resume().
+          </p>
+          <div style={row}>
+            <button
+              onClick={startContinuousPlaybackTest}
+              onTouchEnd={(e) => {
+                e.preventDefault();
+                startContinuousPlaybackTest();
+              }}
+              disabled={continuousTestRunning || continuousLoopActive}
+              style={{ padding: "8px 16px", cursor: "pointer", touchAction: "manipulation" }}
+            >
+              {continuousTestRunning ? "Running..." : "Start continuous-playback test"}
+            </button>
+            {continuousLoopActive && (
+              <button
+                onClick={stopContinuousLoop}
+                onTouchEnd={(e) => {
+                  e.preventDefault();
+                  stopContinuousLoop();
+                }}
+                style={{ padding: "8px 16px", cursor: "pointer", touchAction: "manipulation" }}
+              >
+                Stop loop
+              </button>
+            )}
+          </div>
+          <div style={mono}>{continuousTestResult}</div>
         </div>
       </div>
 
