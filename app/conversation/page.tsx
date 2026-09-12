@@ -19,6 +19,7 @@ import Link from "next/link";
 import { createClient } from "@supabase/supabase-js";
 import { LANGUAGE_MAP, FLAG_MAP, AppUser } from "../lib/users";
 import { SCENARIOS, ConversationScenario } from "../lib/conversation-scenarios";
+import { FALLBACK_CLOSING_LINE } from "../lib/conversation-prompts";
 import { useRecorder } from "../lib/use-recorder";
 import { useAudioPlayer } from "../lib/use-audio-player";
 
@@ -44,10 +45,20 @@ const DURATION_OPTIONS_MIN = [3, 5, 10] as const;
 
 // Safety net: if elapsed time overruns the planned duration by this much and
 // Claude still hasn't returned shouldEnd:true, force-end the session rather
-// than letting the conversation run forever.
-const FORCE_END_OVERRUN_SEC = 90;
-// isClosing is sent once remaining time drops below this.
-const CLOSING_THRESHOLD_SEC = 45;
+// than letting the conversation run forever. 180s (rather than a tighter
+// value) leaves room for the closing exchange itself (isClosing is sent at
+// CLOSING_THRESHOLD_SEC remaining) to actually complete: one round trip
+// (record + Whisper + Claude + TTS) can take ~30s, and Claude is told to
+// wrap up over 1-2 turns, so ~2 round trips of headroom are needed.
+const FORCE_END_OVERRUN_SEC = 180;
+// isClosing is sent once remaining time drops below this. 90s (not 45s)
+// gives Claude time to actually finish a natural 1-2 turn closing exchange
+// before the FORCE_END_OVERRUN_SEC fallback would otherwise kick in.
+const CLOSING_THRESHOLD_SEC = 90;
+// How long to wait on the final tutor line (either a real should_end:true
+// reply, or the fixed fallback closing line) before auto-advancing to the
+// result screen, if the user hasn't tapped "Continue" by then.
+const PENDING_END_AUTO_ADVANCE_MS = 10000;
 
 export default function ConversationPage() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
@@ -115,6 +126,13 @@ export default function ConversationPage() {
 
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
 
+  // "Pending end": the tutor's final line (either a real should_end:true
+  // reply, or the fixed FALLBACK_CLOSING_LINE when we force-end) is shown,
+  // Listen is pressable, and the user can either tap Continue or wait — the
+  // screen never jumps straight to the result screen in silence.
+  const [pendingEnd, setPendingEnd] = useState(false);
+  const pendingEndTimeoutRef = useRef<number | null>(null);
+
   const audioPlayer = useAudioPlayer();
 
   const startSession = useCallback(async () => {
@@ -148,6 +166,7 @@ export default function ConversationPage() {
       sessionStartedAtRef.current = Date.now();
       setElapsedDisplaySec(0);
       setTimingLog([]);
+      setPendingEnd(false);
       setPhase("conversation");
     } catch (e) {
       setErrorMessage(e instanceof Error ? e.message : String(e));
@@ -183,6 +202,33 @@ export default function ConversationPage() {
     }
   }, [endSession]);
 
+  const enterPendingEnd = useCallback(
+    (overrideTurn?: { tutorText: string; tutorTextEn: string }) => {
+      if (overrideTurn) setCurrentTurn(overrideTurn);
+      setPendingEnd(true);
+      setBusy(false);
+      if (pendingEndTimeoutRef.current) window.clearTimeout(pendingEndTimeoutRef.current);
+      pendingEndTimeoutRef.current = window.setTimeout(() => {
+        endSession();
+      }, PENDING_END_AUTO_ADVANCE_MS);
+    },
+    [endSession]
+  );
+
+  const handleContinueToResult = useCallback(() => {
+    if (pendingEndTimeoutRef.current) {
+      window.clearTimeout(pendingEndTimeoutRef.current);
+      pendingEndTimeoutRef.current = null;
+    }
+    endSession();
+  }, [endSession]);
+
+  useEffect(() => {
+    return () => {
+      if (pendingEndTimeoutRef.current) window.clearTimeout(pendingEndTimeoutRef.current);
+    };
+  }, []);
+
   // Live ticking clock for the debug panel + the force-end safety net below.
   // Reads sessionStartedAtRef inside the interval callback (an event handler,
   // not render), which is a safe place to access refs / call Date.now().
@@ -199,7 +245,7 @@ export default function ConversationPage() {
   // forever. Only fires when idle/not busy so it never interrupts an
   // in-flight turn.
   useEffect(() => {
-    if (phase !== "conversation" || busy || !sessionId || !plannedDurationSec) return;
+    if (phase !== "conversation" || busy || pendingEnd || !sessionId || !plannedDurationSec) return;
     if (elapsedDisplaySec > plannedDurationSec + FORCE_END_OVERRUN_SEC) {
       // Deferred to a microtask: this effect is a watchdog reacting to time
       // passing (an external signal), not deriving render state, but the
@@ -209,11 +255,11 @@ export default function ConversationPage() {
         addTimingLog(
           `force-end (idle watchdog): elapsed=${elapsedDisplaySec.toFixed(0)}s > planned(${plannedDurationSec}s)+${FORCE_END_OVERRUN_SEC}s`
         );
-        endSession();
+        enterPendingEnd({ tutorText: FALLBACK_CLOSING_LINE.ja, tutorTextEn: FALLBACK_CLOSING_LINE.en });
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [elapsedDisplaySec, phase, busy, sessionId, plannedDurationSec]);
+  }, [elapsedDisplaySec, phase, busy, pendingEnd, sessionId, plannedDurationSec]);
 
   // Broken via a ref to avoid a circular dependency with useRecorder (see
   // handleRecordingComplete below, which needs recorder.reset()).
@@ -235,14 +281,16 @@ export default function ConversationPage() {
       if (!sessionId || !currentTurn) return;
 
       // Safety net: if we're already way past the planned end time, don't
-      // bother transcribing/sending this turn at all — just end the session.
+      // bother transcribing/sending this turn at all — show the fixed
+      // closing line (not Claude — we're deliberately skipping that call)
+      // and let the user listen to it before ending.
       const elapsedAtStartSec = (Date.now() - sessionStartedAtRef.current) / 1000;
       if (elapsedAtStartSec > plannedDurationSec + FORCE_END_OVERRUN_SEC) {
         addTimingLog(
           `force-end: elapsed=${elapsedAtStartSec.toFixed(0)}s > planned(${plannedDurationSec}s)+${FORCE_END_OVERRUN_SEC}s`
         );
         recorder.reset();
-        await endSession();
+        enterPendingEnd({ tutorText: FALLBACK_CLOSING_LINE.ja, tutorTextEn: FALLBACK_CLOSING_LINE.en });
         return;
       }
 
@@ -340,13 +388,19 @@ export default function ConversationPage() {
 
         const elapsedAfterSec = (Date.now() - sessionStartedAtRef.current) / 1000;
         if (turnData.shouldEnd) {
-          addTimingLog(`shouldEnd:true received at elapsed=${elapsedAfterSec.toFixed(0)}s -> ending`);
-          await endSession();
+          // Claude ended it naturally — its own reply (already set as
+          // currentTurn above) IS the closing line. Let the user listen to
+          // it / read it before moving on, rather than jumping straight to
+          // the result screen.
+          addTimingLog(`shouldEnd:true received at elapsed=${elapsedAfterSec.toFixed(0)}s -> pending end`);
+          enterPendingEnd();
         } else if (elapsedAfterSec > plannedDurationSec + FORCE_END_OVERRUN_SEC) {
+          // Overrun despite Claude not ending it — override the display with
+          // the fixed closing line instead of Claude's (non-closing) reply.
           addTimingLog(
             `force-end: elapsed=${elapsedAfterSec.toFixed(0)}s > planned(${plannedDurationSec}s)+${FORCE_END_OVERRUN_SEC}s (shouldEnd never received)`
           );
-          await endSession();
+          enterPendingEnd({ tutorText: FALLBACK_CLOSING_LINE.ja, tutorTextEn: FALLBACK_CLOSING_LINE.en });
         }
       } catch (e) {
         // The transcript IS already known to us here, but per the server fix
@@ -361,7 +415,7 @@ export default function ConversationPage() {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sessionId, currentTurn, plannedDurationSec, endSession, addTimingLog]
+    [sessionId, currentTurn, plannedDurationSec, endSession, enterPendingEnd, addTimingLog]
   );
 
   useEffect(() => {
@@ -733,7 +787,27 @@ export default function ConversationPage() {
           </div>
         )}
 
-        {busy ? (
+        {pendingEnd ? (
+          <div style={{ textAlign: "center", marginTop: 12 }}>
+            <div style={{ fontSize: 13, color: "#888", marginBottom: 12 }}>
+              Listen to the teacher, then continue when you&apos;re ready.
+            </div>
+            <button
+              onClick={handleContinueToResult}
+              style={{
+                padding: "14px 28px",
+                borderRadius: 24,
+                border: "none",
+                background: "#ff8c42",
+                color: "white",
+                fontSize: 16,
+                cursor: "pointer",
+              }}
+            >
+              Continue
+            </button>
+          </div>
+        ) : busy ? (
           <div style={{ textAlign: "center", padding: 20 }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}>💭</div>
             <div style={{ fontSize: 16, color: "#666" }}>{busyMessage}</div>

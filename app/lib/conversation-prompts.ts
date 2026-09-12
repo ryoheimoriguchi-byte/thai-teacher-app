@@ -97,9 +97,18 @@ const CLOSING_INSTRUCTION = `
 生徒に新しい質問をしないこと。
 `.trim();
 
+const OUTPUT_FORMAT_RULES = `
+出力は有効な JSON 一つだけにしてください。
+- JSON の前後に、説明・前置き・あいさつ・コメントを一切付けないこと
+- コードブロックの記号（\`\`\`）を付けないこと
+- JSON 以外の文字を1文字でも出力すると、システム側でパースに失敗し、
+  生徒の会話が止まってしまいます。必ず { から始まり } で終わる、
+  それ以外の文字を含まない出力にしてください
+`.trim();
+
 const OUTPUT_FORMAT = `
 ## 出力形式
-必ず以下の JSON のみを返してください。前置きも説明も、コードブロックの記号も付けないこと。
+${OUTPUT_FORMAT_RULES}
 
 {
   "reply": "生徒への発話（ひらがな）",
@@ -115,7 +124,7 @@ should_end は、会話が自然に終わったと判断したときだけ true 
 // をせずに済むよう、Claude が既に読んでいる内容から出力させるだけにしている。
 const OUTPUT_FORMAT_WITH_TRANSCRIPT = `
 ## 出力形式
-必ず以下の JSON のみを返してください。前置きも説明も、コードブロックの記号も付けないこと。
+${OUTPUT_FORMAT_RULES}
 
 {
   "reply": "生徒への発話（ひらがな）",
@@ -126,6 +135,17 @@ const OUTPUT_FORMAT_WITH_TRANSCRIPT = `
 
 should_end は、会話が自然に終わったと判断したときだけ true にしてください。
 `.trim();
+
+/**
+ * 強制終了フォールバック用の固定の締め文（Claude を呼ばない場合に使う）。
+ * 時間超過フォールバック（app/conversation/page.tsx の FORCE_END_OVERRUN_SEC）
+ * が発火したとき、無言で終了画面に切り替えるのではなく、この固定文を
+ * 先生の最後の発話として表示してから終了する。
+ */
+export const FALLBACK_CLOSING_LINE = {
+  ja: 'きょうは ここまで！ ありがとう、またはなそうね。',
+  en: "That's it for today! Thank you, let's talk again.",
+};
 
 export interface ConversationPromptOptions {
   scenarioId: string;

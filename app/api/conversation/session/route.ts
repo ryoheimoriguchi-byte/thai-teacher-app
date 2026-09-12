@@ -53,6 +53,9 @@ async function askClaudeText(params: {
     ...(params.system ? { system: params.system } : {}),
     messages: params.messages,
   });
+  console.log(
+    `[conversation/session] Claude usage: input=${response.usage.input_tokens} output=${response.usage.output_tokens} stop_reason=${response.stop_reason}`
+  );
   return response.content[0].type === "text" ? response.content[0].text : "";
 }
 

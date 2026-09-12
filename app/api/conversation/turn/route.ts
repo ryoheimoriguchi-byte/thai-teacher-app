@@ -115,10 +115,15 @@ export async function POST(req: NextRequest) {
     const nextTurn = await callClaudeForJson<TurnReply>(async () => {
       const response = await anthropic.messages.create({
         model: CLAUDE_MODEL,
-        max_tokens: 150, // 実出力は60〜82 tokens程度。暴走時の上限として抑える
+        // 250: reply + reply_en + transcript_en + should_end の4フィールド分の
+        // 余裕を見て引き上げ（旧150ではJSONが途中で切れてパース失敗する事例が発生した）。
+        max_tokens: 250,
         system: systemPrompt,
         messages,
       });
+      console.log(
+        `[conversation/turn] Claude usage: input=${response.usage.input_tokens} output=${response.usage.output_tokens} stop_reason=${response.stop_reason}`
+      );
       return response.content[0].type === "text" ? response.content[0].text : "";
     });
 
