@@ -121,7 +121,12 @@ export function useRecorder(options: UseRecorderOptions) {
             if (remaining <= 0) {
               if (graceTimerRef.current) window.clearInterval(graceTimerRef.current);
               const blob = new Blob(segmentsRef.current, { type: mimeTypeRef.current || "audio/webm" });
-              const totalMs = accumulatedMsRef.current;
+              // Math.round: performance.now() differences are floats (and
+              // summing multiple "keep talking" segments compounds the
+              // float error), but this value ultimately gets written to an
+              // `integer` DB column (recording_ms / speaking_ms). Round here
+              // at the source so every consumer downstream gets an integer.
+              const totalMs = Math.round(accumulatedMsRef.current);
               accumulatedMsRef.current = 0;
               setRecState("stopped");
               onRecordingComplete(blob, mimeTypeRef.current || "audio/webm", totalMs);
@@ -129,7 +134,7 @@ export function useRecorder(options: UseRecorderOptions) {
           }, 100);
         } else {
           const blob = new Blob(segmentsRef.current, { type: mimeTypeRef.current || "audio/webm" });
-          const totalMs = accumulatedMsRef.current;
+          const totalMs = Math.round(accumulatedMsRef.current);
           accumulatedMsRef.current = 0;
           setRecState("stopped");
           onRecordingComplete(blob, mimeTypeRef.current || "audio/webm", totalMs);

@@ -90,10 +90,13 @@ export default function ConversationPage() {
   const [currentTurn, setCurrentTurn] = useState<CurrentTurn | null>(null);
   const [history, setHistory] = useState<HistoryTurn[]>([]);
   const [showTranslation, setShowTranslation] = useState(false);
-  // Kana-only (display) version of the last transcript, shown in "こう
-  // きこえたよ". The kanji version is only ever used internally (sent to
-  // /turn, stored in the DB) — never shown, since Mirei can't read kanji yet.
+  // Kana-only (display) version of the last transcript, shown in "You
+  // said". The kanji version is only ever used internally (sent to /turn,
+  // stored in the DB) — never shown, since Mirei can't read kanji yet.
+  // Stays visible (not cleared) until the next recording starts, so the
+  // child has time to read it alongside the tutor's next reply.
   const [lastTranscriptKana, setLastTranscriptKana] = useState<string | null>(null);
+  const [lastTranscriptEn, setLastTranscriptEn] = useState<string | null>(null);
   const [retryNotice, setRetryNotice] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   // Set only when a turn failed AFTER we already have a transcript (i.e. the
@@ -117,7 +120,7 @@ export default function ConversationPage() {
   const startSession = useCallback(async () => {
     if (!currentUser || !selectedScenario || !selectedDurationMin) return;
     setBusy(true);
-    setBusyMessage("じゅんびしているよ...");
+    setBusyMessage("Getting ready...");
     setErrorMessage(null);
     try {
       const res = await fetch("/api/conversation/session", {
@@ -139,6 +142,7 @@ export default function ConversationPage() {
       setHistory([]);
       setShowTranslation(false);
       setLastTranscriptKana(null);
+      setLastTranscriptEn(null);
       setRetryNotice(null);
       setPlannedDurationSec(selectedDurationMin * 60);
       sessionStartedAtRef.current = Date.now();
@@ -155,7 +159,7 @@ export default function ConversationPage() {
   const endSession = useCallback(async () => {
     if (!sessionId) return;
     setBusy(true);
-    setBusyMessage("けっかを まとめているよ...");
+    setBusyMessage("Wrapping up...");
     try {
       const actualDurationSec = Math.round((Date.now() - sessionStartedAtRef.current) / 1000);
       const res = await fetch("/api/conversation/session", {
@@ -174,7 +178,7 @@ export default function ConversationPage() {
   }, [sessionId]);
 
   const handleCancel = useCallback(() => {
-    if (window.confirm("かいわを やめますか？")) {
+    if (window.confirm("Quit this conversation?")) {
       endSession();
     }
   }, [endSession]);
@@ -243,7 +247,7 @@ export default function ConversationPage() {
       }
 
       setBusy(true);
-      setBusyMessage("せんせいが きいているよ...");
+      setBusyMessage("Listening...");
       setRetryNotice(null);
       setTurnError(null);
       setErrorMessage(null);
@@ -281,14 +285,14 @@ export default function ConversationPage() {
         // Whisper returned nothing (silence / unintelligible). Don't call
         // /turn, don't burn a Claude call. Go straight back to waiting for
         // a new recording; the tutor's line stays exactly as it was.
-        setRetryNotice("もういちど はなしてね");
+        setRetryNotice("Didn't catch that — please try again");
         setBusy(false);
         recorder.reset();
         return;
       }
 
       setLastTranscriptKana(transcriptKana);
-      setBusyMessage("せんせいが かんがえているよ...");
+      setBusyMessage("The teacher is thinking...");
 
       const elapsedSec = (Date.now() - sessionStartedAtRef.current) / 1000;
       const isClosing = plannedDurationSec - elapsedSec <= CLOSING_THRESHOLD_SEC;
@@ -303,7 +307,10 @@ export default function ConversationPage() {
           body: JSON.stringify({
             sessionId,
             transcript,
-            recordingMs: totalMs,
+            // Math.round defensively, even though use-recorder.ts already
+            // rounds — recording_ms/speaking_ms are `integer` DB columns and
+            // a stray float here breaks the DB write.
+            recordingMs: Math.round(totalMs),
             isClosing,
           }),
         });
@@ -321,7 +328,12 @@ export default function ConversationPage() {
           },
         ]);
         setCurrentTurn({ tutorText: turnData.tutorText, tutorTextEn: turnData.tutorTextEn });
-        setLastTranscriptKana(null);
+        // Deliberately NOT clearing lastTranscriptKana/lastTranscriptEn here —
+        // "You said" stays visible (with its English translation, now
+        // available) until the next recording starts, so the child can read
+        // it alongside the tutor's new reply rather than having it vanish
+        // the instant a response arrives.
+        setLastTranscriptEn((turnData.transcriptEn as string | null) ?? null);
         setShowTranslation(false);
         recorder.reset();
         setBusy(false);
@@ -385,7 +397,7 @@ export default function ConversationPage() {
     return (
       <main style={containerStyle}>
         <div style={{ padding: 20 }}>
-          <h1 style={{ fontSize: 20, marginBottom: 16 }}>にほんごで はなそう</h1>
+          <h1 style={{ fontSize: 20, marginBottom: 16 }}>Let&apos;s talk in Japanese</h1>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 24 }}>
             {SCENARIOS.map((s) => (
@@ -408,7 +420,7 @@ export default function ConversationPage() {
           </div>
 
           <div style={{ marginBottom: 24 }}>
-            <div style={{ fontSize: 15, marginBottom: 8, color: "#555" }}>なんぷん はなす？</div>
+            <div style={{ fontSize: 15, marginBottom: 8, color: "#555" }}>How many minutes?</div>
             <div style={{ display: "flex", gap: 12 }}>
               {DURATION_OPTIONS_MIN.map((min) => (
                 <button
@@ -424,7 +436,7 @@ export default function ConversationPage() {
                     cursor: "pointer",
                   }}
                 >
-                  {min}ふん
+                  {min} min
                 </button>
               ))}
             </div>
@@ -444,7 +456,7 @@ export default function ConversationPage() {
               cursor: selectedScenario && selectedDurationMin ? "pointer" : "not-allowed",
             }}
           >
-            つぎへ
+            Next
           </button>
         </div>
       </main>
@@ -460,7 +472,7 @@ export default function ConversationPage() {
             onClick={() => setPhase("select")}
             style={{ background: "none", border: "none", color: "#888", fontSize: 14, marginBottom: 16, cursor: "pointer", padding: 0 }}
           >
-            ← ちがう おはなしにする
+            ← Choose a different topic
           </button>
 
           <div style={{ fontSize: 24, fontWeight: "bold", marginBottom: 16 }}>{selectedScenario.title}</div>
@@ -495,7 +507,7 @@ export default function ConversationPage() {
               cursor: busy ? "default" : "pointer",
             }}
           >
-            {busy ? busyMessage || "じゅんびしているよ..." : "はじめる"}
+            {busy ? busyMessage || "Getting ready..." : "Start"}
           </button>
         </div>
       </main>
@@ -507,7 +519,7 @@ export default function ConversationPage() {
     return (
       <main style={containerStyle}>
         <div style={{ padding: 20 }}>
-          <div style={{ fontSize: 20, fontWeight: "bold", marginBottom: 16 }}>おつかれさま！</div>
+          <div style={{ fontSize: 20, fontWeight: "bold", marginBottom: 16 }}>Nice work!</div>
           <pre
             style={{
               background: "#222",
@@ -537,7 +549,7 @@ export default function ConversationPage() {
               boxSizing: "border-box",
             }}
           >
-            ホームへもどる
+            Return home
           </Link>
         </div>
       </main>
@@ -550,6 +562,8 @@ export default function ConversationPage() {
 
   const handleMicTap = () => {
     if (recState === "idle") {
+      setLastTranscriptKana(null);
+      setLastTranscriptEn(null);
       recorder.startRecording();
     } else if (recState === "recording") {
       recorder.stopManually();
@@ -572,7 +586,7 @@ export default function ConversationPage() {
           onClick={handleCancel}
           style={{ background: "none", border: "none", fontSize: 15, color: "#888", cursor: "pointer", padding: 0 }}
         >
-          ← やめる
+          ← Quit
         </button>
       </div>
 
@@ -605,7 +619,7 @@ export default function ConversationPage() {
                 marginRight: 8,
               }}
             >
-              🔊 {audioPlayer.state === "loading" ? "..." : audioPlayer.state === "playing" ? "さいせい中" : "きく"}
+              🔊 {audioPlayer.state === "loading" ? "..." : audioPlayer.state === "playing" ? "Playing" : "Listen"}
             </button>
 
             <button
@@ -618,7 +632,7 @@ export default function ConversationPage() {
                 cursor: "pointer",
               }}
             >
-              えいやくを {showTranslation ? "とじる" : "みる"}
+              {showTranslation ? "Hide English" : "Show English"}
             </button>
 
             {showTranslation && (
@@ -639,7 +653,10 @@ export default function ConversationPage() {
               boxSizing: "border-box",
             }}
           >
-            こう きこえたよ: 「{lastTranscriptKana}」
+            <div>You said: 「{lastTranscriptKana}」</div>
+            {lastTranscriptEn && (
+              <div style={{ marginTop: 4, fontSize: 13, color: "#8a9a8a" }}>{lastTranscriptEn}</div>
+            )}
           </div>
         )}
 
@@ -693,7 +710,7 @@ export default function ConversationPage() {
                   cursor: "pointer",
                 }}
               >
-                🎤 もういちど はなす
+                🎤 Try again
               </button>
               <button
                 onClick={() => {
@@ -710,7 +727,7 @@ export default function ConversationPage() {
                   cursor: "pointer",
                 }}
               >
-                かいわを おわる
+                End conversation
               </button>
             </div>
           </div>
@@ -740,7 +757,7 @@ export default function ConversationPage() {
               🎤
             </button>
             <div style={{ marginTop: 8, fontSize: 15, color: "#666" }}>
-              {recState === "recording" ? "きいているよ..." : "はなしてね"}
+              {recState === "recording" ? "Listening..." : "Your turn"}
             </div>
 
             {recState === "grace" && (
@@ -757,7 +774,7 @@ export default function ConversationPage() {
                   cursor: "pointer",
                 }}
               >
-                まだ はなす （{Math.ceil(recorder.graceRemainingMs / 100) / 10}s）
+                Keep talking ({Math.ceil(recorder.graceRemainingMs / 100) / 10}s)
               </button>
             )}
 
@@ -785,12 +802,12 @@ export default function ConversationPage() {
             cursor: "pointer",
           }}
         >
-          これまでの かいわ {historyOpen ? "▲" : "▼"}
+          Conversation history {historyOpen ? "▲" : "▼"}
         </button>
         {historyOpen && (
           <div style={{ padding: "0 16px 16px", maxHeight: 240, overflowY: "auto" }}>
             {history.length === 0 ? (
-              <div style={{ fontSize: 13, color: "#aaa" }}>(まだ ないよ)</div>
+              <div style={{ fontSize: 13, color: "#aaa" }}>(none yet)</div>
             ) : (
               history.map((h, i) => (
                 <div key={i} style={{ marginBottom: 12, fontSize: 14 }}>

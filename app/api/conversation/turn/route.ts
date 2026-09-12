@@ -30,7 +30,14 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const sessionId = body.sessionId as string;
     const transcript = body.transcript as string;
-    const recordingMs = (body.recordingMs as number | undefined) ?? null;
+    // Math.round defensively: recording_ms / speaking_ms are `integer` DB
+    // columns. A float here (even a tiny one, e.g. from client-side
+    // performance.now() math) makes the DB insert/update fail outright.
+    const recordingMsRaw = body.recordingMs as number | undefined;
+    const recordingMs =
+      typeof recordingMsRaw === "number" && Number.isFinite(recordingMsRaw)
+        ? Math.round(recordingMsRaw)
+        : null;
     const isClosing = Boolean(body.isClosing);
 
     if (!sessionId || typeof transcript !== "string") {

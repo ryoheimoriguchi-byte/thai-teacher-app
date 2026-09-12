@@ -157,7 +157,12 @@ async function handleStart(body: Record<string, unknown>) {
 
 async function handleEnd(body: Record<string, unknown>) {
   const sessionId = body.sessionId as string;
-  const actualDurationSec = (body.actualDurationSec as number) ?? null;
+  // Math.round defensively — actual_duration_sec is an `integer` DB column.
+  const actualDurationSecRaw = body.actualDurationSec as number | undefined;
+  const actualDurationSec =
+    typeof actualDurationSecRaw === "number" && Number.isFinite(actualDurationSecRaw)
+      ? Math.round(actualDurationSecRaw)
+      : null;
 
   if (!sessionId) {
     return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
