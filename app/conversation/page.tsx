@@ -36,9 +36,18 @@ type CurrentTurn = {
 
 type HistoryTurn = CurrentTurn & {
   transcript: string;
+  transcriptKana: string;
+  transcriptEn: string | null;
 };
 
 const DURATION_OPTIONS_MIN = [3, 5, 10] as const;
+
+// Safety net: if elapsed time overruns the planned duration by this much and
+// Claude still hasn't returned shouldEnd:true, force-end the session rather
+// than letting the conversation run forever.
+const FORCE_END_OVERRUN_SEC = 90;
+// isClosing is sent once remaining time drops below this.
+const CLOSING_THRESHOLD_SEC = 45;
 
 export default function ConversationPage() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
@@ -81,9 +90,25 @@ export default function ConversationPage() {
   const [currentTurn, setCurrentTurn] = useState<CurrentTurn | null>(null);
   const [history, setHistory] = useState<HistoryTurn[]>([]);
   const [showTranslation, setShowTranslation] = useState(false);
-  const [lastTranscript, setLastTranscript] = useState<string | null>(null);
+  // Kana-only (display) version of the last transcript, shown in "こう
+  // きこえたよ". The kanji version is only ever used internally (sent to
+  // /turn, stored in the DB) — never shown, since Mirei can't read kanji yet.
+  const [lastTranscriptKana, setLastTranscriptKana] = useState<string | null>(null);
   const [retryNotice, setRetryNotice] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Set only when a turn failed AFTER we already have a transcript (i.e. the
+  // /turn call itself failed, not /transcribe). Distinct from errorMessage
+  // so we can show explicit recovery actions instead of a bare error line.
+  const [turnError, setTurnError] = useState<string | null>(null);
+
+  // ?debug=1 panel: elapsed time / isClosing bookkeeping, so this can be
+  // verified on a real device without guessing.
+  const [timingLog, setTimingLog] = useState<string[]>([]);
+  const addTimingLog = useCallback((msg: string) => {
+    const t = new Date().toISOString().split("T")[1].replace("Z", "");
+    setTimingLog((prev) => [...prev.slice(-29), `${t} ${msg}`]);
+  }, []);
+  const [elapsedDisplaySec, setElapsedDisplaySec] = useState(0); // updated every second for the debug panel; safe to read during render (state, not a ref/Date.now() call)
 
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
 
@@ -113,10 +138,12 @@ export default function ConversationPage() {
       setCurrentTurn({ tutorText: data.tutorText, tutorTextEn: data.tutorTextEn });
       setHistory([]);
       setShowTranslation(false);
-      setLastTranscript(null);
+      setLastTranscriptKana(null);
       setRetryNotice(null);
       setPlannedDurationSec(selectedDurationMin * 60);
       sessionStartedAtRef.current = Date.now();
+      setElapsedDisplaySec(0);
+      setTimingLog([]);
       setPhase("conversation");
     } catch (e) {
       setErrorMessage(e instanceof Error ? e.message : String(e));
@@ -152,6 +179,38 @@ export default function ConversationPage() {
     }
   }, [endSession]);
 
+  // Live ticking clock for the debug panel + the force-end safety net below.
+  // Reads sessionStartedAtRef inside the interval callback (an event handler,
+  // not render), which is a safe place to access refs / call Date.now().
+  useEffect(() => {
+    if (phase !== "conversation") return;
+    const interval = window.setInterval(() => {
+      setElapsedDisplaySec((Date.now() - sessionStartedAtRef.current) / 1000);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [phase]);
+
+  // Safety net: even if the user stops interacting (no more recordings) once
+  // time is way overrun, force-end rather than leaving the session open
+  // forever. Only fires when idle/not busy so it never interrupts an
+  // in-flight turn.
+  useEffect(() => {
+    if (phase !== "conversation" || busy || !sessionId || !plannedDurationSec) return;
+    if (elapsedDisplaySec > plannedDurationSec + FORCE_END_OVERRUN_SEC) {
+      // Deferred to a microtask: this effect is a watchdog reacting to time
+      // passing (an external signal), not deriving render state, but the
+      // lint rule can't tell the two apart — defer so it isn't a plain
+      // synchronous setState-in-effect call.
+      queueMicrotask(() => {
+        addTimingLog(
+          `force-end (idle watchdog): elapsed=${elapsedDisplaySec.toFixed(0)}s > planned(${plannedDurationSec}s)+${FORCE_END_OVERRUN_SEC}s`
+        );
+        endSession();
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [elapsedDisplaySec, phase, busy, sessionId, plannedDurationSec]);
+
   // Broken via a ref to avoid a circular dependency with useRecorder (see
   // handleRecordingComplete below, which needs recorder.reset()).
   const handleRecordingCompleteRef = useRef<
@@ -170,10 +229,27 @@ export default function ConversationPage() {
   const handleRecordingComplete = useCallback(
     async (blob: Blob, mimeType: string, totalMs: number) => {
       if (!sessionId || !currentTurn) return;
-      setBusy(true);
-      setBusyMessage("せんせいが かんがえているよ...");
-      setRetryNotice(null);
 
+      // Safety net: if we're already way past the planned end time, don't
+      // bother transcribing/sending this turn at all — just end the session.
+      const elapsedAtStartSec = (Date.now() - sessionStartedAtRef.current) / 1000;
+      if (elapsedAtStartSec > plannedDurationSec + FORCE_END_OVERRUN_SEC) {
+        addTimingLog(
+          `force-end: elapsed=${elapsedAtStartSec.toFixed(0)}s > planned(${plannedDurationSec}s)+${FORCE_END_OVERRUN_SEC}s`
+        );
+        recorder.reset();
+        await endSession();
+        return;
+      }
+
+      setBusy(true);
+      setBusyMessage("せんせいが きいているよ...");
+      setRetryNotice(null);
+      setTurnError(null);
+      setErrorMessage(null);
+
+      let transcript: string; // kanji-mixed, as returned by Whisper — internal use only (DB / scoring)
+      let transcriptKana: string; // hiragana-only — display only
       try {
         const ext = mimeType.includes("mp4") ? "mp4" : mimeType.includes("ogg") ? "ogg" : "webm";
         const formData = new FormData();
@@ -187,23 +263,40 @@ export default function ConversationPage() {
         const transcribeData = await transcribeRes.json();
         if (!transcribeRes.ok) throw new Error(transcribeData.error || "Transcription failed");
 
-        const transcript = ((transcribeData.transcript as string) ?? "").trim();
-
-        if (!transcript) {
-          // Whisper returned nothing (silence / unintelligible). Don't call
-          // /turn, don't burn a Claude call. Go straight back to waiting for
-          // a new recording; the tutor's line stays exactly as it was.
-          setRetryNotice("もういちど はなしてね");
-          setBusy(false);
-          recorder.reset();
-          return;
+        transcript = ((transcribeData.transcript as string) ?? "").trim();
+        transcriptKana = ((transcribeData.transcriptKana as string) ?? transcript).trim();
+        if (typeof transcribeData.kanaConversionMs === "number") {
+          addTimingLog(`kana conversion: ${transcribeData.kanaConversionMs}ms`);
         }
+      } catch (e) {
+        // Nothing was persisted server-side for this attempt (transcribe
+        // doesn't write to the DB) — a plain retry via the mic button is safe.
+        setBusy(false);
+        setErrorMessage(e instanceof Error ? e.message : String(e));
+        recorder.reset();
+        return;
+      }
 
-        setLastTranscript(transcript);
+      if (!transcript) {
+        // Whisper returned nothing (silence / unintelligible). Don't call
+        // /turn, don't burn a Claude call. Go straight back to waiting for
+        // a new recording; the tutor's line stays exactly as it was.
+        setRetryNotice("もういちど はなしてね");
+        setBusy(false);
+        recorder.reset();
+        return;
+      }
 
-        const elapsedSec = (Date.now() - sessionStartedAtRef.current) / 1000;
-        const isClosing = plannedDurationSec - elapsedSec <= 45;
+      setLastTranscriptKana(transcriptKana);
+      setBusyMessage("せんせいが かんがえているよ...");
 
+      const elapsedSec = (Date.now() - sessionStartedAtRef.current) / 1000;
+      const isClosing = plannedDurationSec - elapsedSec <= CLOSING_THRESHOLD_SEC;
+      addTimingLog(
+        `turn: elapsed=${elapsedSec.toFixed(0)}s / planned=${plannedDurationSec}s / isClosing=${isClosing}`
+      );
+
+      try {
         const turnRes = await fetch("/api/conversation/turn", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -219,25 +312,44 @@ export default function ConversationPage() {
 
         setHistory((prev) => [
           ...prev,
-          { tutorText: currentTurn.tutorText, tutorTextEn: currentTurn.tutorTextEn, transcript },
+          {
+            tutorText: currentTurn.tutorText,
+            tutorTextEn: currentTurn.tutorTextEn,
+            transcript,
+            transcriptKana,
+            transcriptEn: (turnData.transcriptEn as string | null) ?? null,
+          },
         ]);
         setCurrentTurn({ tutorText: turnData.tutorText, tutorTextEn: turnData.tutorTextEn });
-        setLastTranscript(null);
+        setLastTranscriptKana(null);
         setShowTranslation(false);
         recorder.reset();
         setBusy(false);
 
+        const elapsedAfterSec = (Date.now() - sessionStartedAtRef.current) / 1000;
         if (turnData.shouldEnd) {
+          addTimingLog(`shouldEnd:true received at elapsed=${elapsedAfterSec.toFixed(0)}s -> ending`);
+          await endSession();
+        } else if (elapsedAfterSec > plannedDurationSec + FORCE_END_OVERRUN_SEC) {
+          addTimingLog(
+            `force-end: elapsed=${elapsedAfterSec.toFixed(0)}s > planned(${plannedDurationSec}s)+${FORCE_END_OVERRUN_SEC}s (shouldEnd never received)`
+          );
           await endSession();
         }
       } catch (e) {
+        // The transcript IS already known to us here, but per the server fix
+        // it was NOT yet written to the DB (the write is deferred until
+        // Claude succeeds) — so the "open turn" for this session is still
+        // valid, and a plain retry (record again) will work correctly.
+        // We still show explicit recovery actions since it's not obvious
+        // to a child what to do next when this happens.
         setBusy(false);
-        setErrorMessage(e instanceof Error ? e.message : String(e));
+        setTurnError(e instanceof Error ? e.message : String(e));
         recorder.reset();
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sessionId, currentTurn, plannedDurationSec, endSession]
+    [sessionId, currentTurn, plannedDurationSec, endSession, addTimingLog]
   );
 
   useEffect(() => {
@@ -515,7 +627,7 @@ export default function ConversationPage() {
           </div>
         )}
 
-        {lastTranscript && (
+        {lastTranscriptKana && (
           <div
             style={{
               width: "100%",
@@ -527,7 +639,7 @@ export default function ConversationPage() {
               boxSizing: "border-box",
             }}
           >
-            こう きこえたよ: 「{lastTranscript}」
+            こう きこえたよ: 「{lastTranscriptKana}」
           </div>
         )}
 
@@ -548,9 +660,59 @@ export default function ConversationPage() {
           </div>
         )}
 
-        {errorMessage && (
+        {errorMessage && !turnError && (
           <div style={{ color: "#c00", marginBottom: 16, fontSize: 14, textAlign: "center" }}>
             ⚠️ {errorMessage}
+          </div>
+        )}
+
+        {turnError && (
+          <div
+            style={{
+              width: "100%",
+              background: "#fdecea",
+              border: "1px solid #f5c6cb",
+              borderRadius: 12,
+              padding: 16,
+              marginBottom: 16,
+              textAlign: "center",
+              boxSizing: "border-box",
+            }}
+          >
+            <div style={{ color: "#611a15", fontSize: 14, marginBottom: 12 }}>⚠️ {turnError}</div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+              <button
+                onClick={() => setTurnError(null)}
+                style={{
+                  padding: "10px 16px",
+                  borderRadius: 20,
+                  border: "none",
+                  background: "#4caf50",
+                  color: "white",
+                  fontSize: 15,
+                  cursor: "pointer",
+                }}
+              >
+                🎤 もういちど はなす
+              </button>
+              <button
+                onClick={() => {
+                  setTurnError(null);
+                  endSession();
+                }}
+                style={{
+                  padding: "10px 16px",
+                  borderRadius: 20,
+                  border: "1px solid #ccc",
+                  background: "white",
+                  color: "#555",
+                  fontSize: 15,
+                  cursor: "pointer",
+                }}
+              >
+                かいわを おわる
+              </button>
+            </div>
           </div>
         )}
 
@@ -633,7 +795,10 @@ export default function ConversationPage() {
               history.map((h, i) => (
                 <div key={i} style={{ marginBottom: 12, fontSize: 14 }}>
                   <div style={{ color: "#555" }}>👩‍🏫 {h.tutorText}</div>
-                  <div style={{ color: "#333", marginTop: 2 }}>🧒 {h.transcript}</div>
+                  <div style={{ color: "#333", marginTop: 2 }}>🧒 {h.transcriptKana}</div>
+                  {h.transcriptEn && (
+                    <div style={{ color: "#999", marginTop: 2, fontSize: 12 }}>({h.transcriptEn})</div>
+                  )}
                 </div>
               ))
             )}
@@ -653,6 +818,9 @@ export default function ConversationPage() {
           liveRms={recorder.liveRms}
           debugLog={recorder.debugLog}
           actualSettings={recorder.actualSettings}
+          elapsedSec={elapsedDisplaySec}
+          plannedDurationSec={plannedDurationSec}
+          timingLog={timingLog}
         />
       )}
     </main>
@@ -669,6 +837,9 @@ function DebugPanel(props: {
   liveRms: number;
   debugLog: string[];
   actualSettings: string;
+  elapsedSec: number;
+  plannedDurationSec: number;
+  timingLog: string[];
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -690,6 +861,25 @@ function DebugPanel(props: {
       </button>
       {open && (
         <div style={{ padding: 16, fontSize: 12 }}>
+          <div style={{ marginBottom: 8, fontWeight: "bold" }}>
+            elapsed: {props.elapsedSec.toFixed(0)}s / planned: {props.plannedDurationSec}s / remaining:{" "}
+            {(props.plannedDurationSec - props.elapsedSec).toFixed(0)}s / isClosing now:{" "}
+            {String(props.plannedDurationSec - props.elapsedSec <= CLOSING_THRESHOLD_SEC)}
+          </div>
+          <div
+            style={{
+              marginBottom: 12,
+              whiteSpace: "pre-wrap",
+              fontFamily: "monospace",
+              background: "#fff",
+              padding: 8,
+              borderRadius: 4,
+              maxHeight: 150,
+              overflowY: "auto",
+            }}
+          >
+            {props.timingLog.length === 0 ? "(no timing events yet)" : props.timingLog.join("\n")}
+          </div>
           <div style={{ marginBottom: 8 }}>
             <label>
               Silence threshold (RMS): {props.silenceThreshold.toFixed(3)}

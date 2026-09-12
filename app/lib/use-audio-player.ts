@@ -116,9 +116,21 @@ export function useAudioPlayer() {
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(ctx.destination);
-        if (nextStartTime === 0) {
-          nextStartTime = ctx.currentTime + 0.03; // small lookahead margin
-          setState("playing");
+
+        if (!scheduledAny) setState("playing");
+
+        // Clamp to "now" whenever nextStartTime has fallen behind real time
+        // (the first chunk always falls in this branch since nextStartTime
+        // starts at 0). Scheduling source.start() with a time that has
+        // already passed does NOT resume mid-buffer — the browser starts it
+        // immediately from the beginning, which overlaps with whatever
+        // previous chunk is still audibly playing. That overlap is what
+        // caused the echo/doubling reported at the start of playback,
+        // since early chunks are the most likely to arrive slower than
+        // real-time due to network/decode warm-up.
+        const now = ctx.currentTime;
+        if (nextStartTime < now + 0.01) {
+          nextStartTime = now + 0.03; // small lookahead margin
         }
         source.start(nextStartTime);
         nextStartTime += audioBuffer.duration;

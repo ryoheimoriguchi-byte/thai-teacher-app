@@ -13,6 +13,7 @@ import {
   updateSessionProgress,
 } from "@/app/lib/conversation-db";
 import { callClaudeForJson } from "@/app/lib/claude-json";
+import { toErrorMessage } from "@/app/lib/api-error";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const CLAUDE_MODEL = "claude-sonnet-4-5"; // Opus は使わない（遅すぎる）
@@ -20,6 +21,7 @@ const CLAUDE_MODEL = "claude-sonnet-4-5"; // Opus は使わない（遅すぎる
 type TurnReply = {
   reply: string;
   reply_en: string;
+  transcript_en?: string;
   should_end: boolean;
 };
 
@@ -62,12 +64,14 @@ export async function POST(req: NextRequest) {
     }
 
     const charCount = transcript.length;
-    await updateTurnTranscript(supabase, lastTurn.id, {
-      transcript,
-      recordingMs,
-      charCount,
-    });
-    // メッセージ組み立て用にローカルでも反映する
+    // NOTE: the transcript write to conversation_turns is deferred until
+    // AFTER Claude succeeds (see below). If we wrote it here and the Claude
+    // call then failed, the last turn would be left with a non-null
+    // transcript but no follow-up turn ever created — permanently blocking
+    // this session (every retry would hit "No open turn is awaiting a
+    // transcript"). Deferring the write keeps the "open turn" guard above
+    // valid for retries after a transient failure.
+    // メッセージ組み立て用にローカルでは反映しておく
     lastTurn.transcript = transcript;
 
     // mastered 語彙は毎ターン DB から取り直す（セッション中のキャッシュはしない）
@@ -111,7 +115,13 @@ export async function POST(req: NextRequest) {
       return response.content[0].type === "text" ? response.content[0].text : "";
     });
 
+    // Claude succeeded — now it's safe to persist everything for this turn.
     const newTurnIndex = turns.length;
+    await updateTurnTranscript(supabase, lastTurn.id, {
+      transcript,
+      recordingMs,
+      charCount,
+    });
     await insertConversationTurn(supabase, {
       sessionId,
       userId: session.user_id,
@@ -129,11 +139,11 @@ export async function POST(req: NextRequest) {
       turnIndex: newTurnIndex,
       tutorText: nextTurn.reply,
       tutorTextEn: nextTurn.reply_en,
+      transcriptEn: nextTurn.transcript_en ?? null,
       shouldEnd: Boolean(nextTurn.should_end),
     });
   } catch (error: unknown) {
     console.error("Conversation turn API error:", error);
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: toErrorMessage(error) }, { status: 500 });
   }
 }

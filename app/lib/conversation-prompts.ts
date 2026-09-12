@@ -110,6 +110,23 @@ const OUTPUT_FORMAT = `
 should_end は、会話が自然に終わったと判断したときだけ true にしてください。
 `.trim();
 
+// 2ターン目以降（isOpening===false）専用。直前の生徒の発話（会話の最後の
+// user メッセージ）の英訳を追加で1フィールド返してもらう。追加の API 呼び出し
+// をせずに済むよう、Claude が既に読んでいる内容から出力させるだけにしている。
+const OUTPUT_FORMAT_WITH_TRANSCRIPT = `
+## 出力形式
+必ず以下の JSON のみを返してください。前置きも説明も、コードブロックの記号も付けないこと。
+
+{
+  "reply": "生徒への発話（ひらがな）",
+  "reply_en": "reply の英訳",
+  "transcript_en": "直前の生徒の発話（会話の最後の user メッセージ）の英訳",
+  "should_end": false
+}
+
+should_end は、会話が自然に終わったと判断したときだけ true にしてください。
+`.trim();
+
 export interface ConversationPromptOptions {
   scenarioId: string;
   studentName: string;
@@ -143,7 +160,7 @@ export function buildConversationPrompt(o: ConversationPromptOptions): string {
   if (o.isOpening) parts.push(OPENING_INSTRUCTION);
   if (o.isClosing) parts.push(CLOSING_INSTRUCTION);
 
-  parts.push(OUTPUT_FORMAT);
+  parts.push(o.isOpening ? OUTPUT_FORMAT : OUTPUT_FORMAT_WITH_TRANSCRIPT);
 
   return parts.filter(Boolean).join('\n\n');
 }

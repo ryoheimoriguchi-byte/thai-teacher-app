@@ -16,6 +16,7 @@ import {
   type ConversationScores,
 } from "@/app/lib/conversation-db";
 import { callClaudeForJson } from "@/app/lib/claude-json";
+import { toErrorMessage } from "@/app/lib/api-error";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const CLAUDE_MODEL = "claude-sonnet-4-5";
@@ -76,8 +77,7 @@ export async function POST(req: NextRequest) {
     );
   } catch (error: unknown) {
     console.error("Conversation session API error:", error);
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ error: toErrorMessage(error) }, { status: 500 });
   }
 }
 
