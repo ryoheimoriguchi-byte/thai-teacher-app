@@ -24,6 +24,9 @@ const CLAUDE_MODEL = "claude-sonnet-4-5";
 type OpeningReply = {
   reply: string;
   reply_en: string;
+  // 記録用（UI非表示、スコアリング設計中）。最初のターンは response_quality は null。
+  support_given?: string | null;
+  response_quality?: string | null;
   should_end: boolean;
 };
 
@@ -143,6 +146,8 @@ async function handleStart(body: Record<string, unknown>) {
     turnIndex: 0,
     tutorText: opening.reply,
     tutorTextEn: opening.reply_en,
+    supportGiven: opening.support_given ?? null,
+    responseQuality: opening.response_quality ?? null,
   });
 
   return NextResponse.json({
@@ -150,6 +155,9 @@ async function handleStart(body: Record<string, unknown>) {
     turnIndex: 0,
     tutorText: opening.reply,
     tutorTextEn: opening.reply_en,
+    // デバッグパネル表示用（?debug=1）。
+    supportGiven: opening.support_given ?? null,
+    responseQuality: opening.response_quality ?? null,
     scenario: {
       id: scenario.id,
       title: scenario.title,

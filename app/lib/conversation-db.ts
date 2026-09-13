@@ -54,6 +54,10 @@ export type ConversationTurnRow = {
   phrases_used: string[];
   vocab_used: string[];
   bonus_words: string[];
+  /** このターンで先生が生徒に与えた支援の強さ（記録用、UI非表示）。値は今後増える可能性があるため text のまま。 */
+  support_given: string | null;
+  /** 直前の生徒の発話が問いかけにどう応答できたか（記録用、UI非表示）。最初のターンは null。 */
+  response_quality: string | null;
   created_at: string;
 };
 
@@ -242,6 +246,10 @@ export async function insertConversationTurn(
     turnIndex: number;
     tutorText: string;
     tutorTextEn: string | null;
+    /** 記録用（UI非表示）。省略時は null（値の種類が増える可能性があるため制約なし）。 */
+    supportGiven?: string | null;
+    /** 記録用（UI非表示）。最初のターンは常に null。 */
+    responseQuality?: string | null;
   }
 ): Promise<ConversationTurnRow> {
   const { data, error } = await supabase
@@ -252,6 +260,8 @@ export async function insertConversationTurn(
       turn_index: params.turnIndex,
       tutor_text: params.tutorText,
       tutor_text_en: params.tutorTextEn,
+      support_given: params.supportGiven ?? null,
+      response_quality: params.responseQuality ?? null,
     })
     .select()
     .single();

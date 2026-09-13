@@ -22,6 +22,10 @@ type TurnReply = {
   reply: string;
   reply_en: string;
   transcript_en?: string;
+  // 記録用（UI非表示、スコアリング設計中）。値の種類が増える可能性があるため
+  // union で縛らず string として受ける。
+  support_given?: string | null;
+  response_quality?: string | null;
   should_end: boolean;
 };
 
@@ -140,6 +144,8 @@ export async function POST(req: NextRequest) {
       turnIndex: newTurnIndex,
       tutorText: nextTurn.reply,
       tutorTextEn: nextTurn.reply_en,
+      supportGiven: nextTurn.support_given ?? null,
+      responseQuality: nextTurn.response_quality ?? null,
     });
 
     await updateSessionProgress(supabase, sessionId, {
@@ -152,6 +158,9 @@ export async function POST(req: NextRequest) {
       tutorText: nextTurn.reply,
       tutorTextEn: nextTurn.reply_en,
       transcriptEn: nextTurn.transcript_en ?? null,
+      // デバッグパネル表示用（?debug=1）。UIの通常表示には使わない。
+      supportGiven: nextTurn.support_given ?? null,
+      responseQuality: nextTurn.response_quality ?? null,
       shouldEnd: Boolean(nextTurn.should_end),
     });
   } catch (error: unknown) {

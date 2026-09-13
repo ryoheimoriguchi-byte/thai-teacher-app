@@ -106,13 +106,43 @@ const OUTPUT_FORMAT_RULES = `
   それ以外の文字を含まない出力にしてください
 `.trim();
 
+// support_given / response_quality はスコアリング設計のためにターン単位で
+// 貯め始めた記録用の値（Cambridge YLE の Interaction 観点に相当）。
+// UI には一切表示されず、生徒本人も見ることはない。会話の進め方や態度に
+// 一切影響させないことを明示する。
+const SUPPORT_TRACKING_INSTRUCTIONS = `
+## 記録用の判定（生徒には見せません）
+support_given と response_quality は、あなたの返答と一緒に返す記録専用の値です。
+この判定は記録用であり、生徒には一切見せません。会話の中でこの判定に触れたり、
+態度を変えたりしないでください。これまで通り、訂正せず、評価せず、会話が
+続くことを最優先してください。
+
+### support_given
+このターンであなた（先生）が生徒に与えた支援。
+- "none": 支援なし
+- "repeat": 同じことを繰り返した
+- "rephrase": やさしく言い換えた、簡単な言葉にした
+- "options": 選択肢を2つ出した
+- "english": 英語で単語の意味を教えた
+複数該当する場合は、最も強い支援を1つ選ぶこと。
+強さの順序: english > options > rephrase > repeat > none
+`.trim();
+
 const OUTPUT_FORMAT = `
 ## 出力形式
 ${OUTPUT_FORMAT_RULES}
 
+${SUPPORT_TRACKING_INSTRUCTIONS}
+
+### response_quality
+最初のターンなので、生徒の発話はまだありません。response_quality は
+必ず null にしてください。
+
 {
   "reply": "生徒への発話（ひらがな）",
   "reply_en": "reply の英訳",
+  "support_given": "none",
+  "response_quality": null,
   "should_end": false
 }
 
@@ -126,10 +156,21 @@ const OUTPUT_FORMAT_WITH_TRANSCRIPT = `
 ## 出力形式
 ${OUTPUT_FORMAT_RULES}
 
+${SUPPORT_TRACKING_INSTRUCTIONS}
+
+### response_quality
+直前の生徒の発話が、あなたの問いかけに対してどうだったか。
+- "answered": 答えられた
+- "partial": 部分的に答えた、または短すぎて意図が伝わりにくい
+- "no_answer": 答えられなかった、黙った、話題がずれた
+- "english": 英語で答えた
+
 {
   "reply": "生徒への発話（ひらがな）",
   "reply_en": "reply の英訳",
   "transcript_en": "直前の生徒の発話（会話の最後の user メッセージ）の英訳",
+  "support_given": "none",
+  "response_quality": "answered",
   "should_end": false
 }
 

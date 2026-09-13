@@ -165,7 +165,9 @@ export default function ConversationPage() {
       setPlannedDurationSec(selectedDurationMin * 60);
       sessionStartedAtRef.current = Date.now();
       setElapsedDisplaySec(0);
-      setTimingLog([]);
+      setTimingLog([
+        `turn 0: support_given=${data.supportGiven ?? "null"} response_quality=${data.responseQuality ?? "null"}`,
+      ]);
       setPendingEnd(false);
       setPhase("conversation");
     } catch (e) {
@@ -376,6 +378,9 @@ export default function ConversationPage() {
           },
         ]);
         setCurrentTurn({ tutorText: turnData.tutorText, tutorTextEn: turnData.tutorTextEn });
+        addTimingLog(
+          `turn ${turnData.turnIndex}: support_given=${turnData.supportGiven ?? "null"} response_quality=${turnData.responseQuality ?? "null"}`
+        );
         // Deliberately NOT clearing lastTranscriptKana/lastTranscriptEn here —
         // "You said" stays visible (with its English translation, now
         // available) until the next recording starts, so the child can read
