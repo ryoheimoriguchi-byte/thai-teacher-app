@@ -126,6 +126,39 @@ export default function ConversationPage() {
 
   const [result, setResult] = useState<Record<string, unknown> | null>(null);
 
+  // Step C3: missions selected for this session (shown on the [2] intro
+  // screen, English only). Populated by startSession(), which now runs when
+  // moving from [1] to [2] (not when pressing "Start") so the missions are
+  // known before the intro screen is shown.
+  const [missions, setMissions] = useState<{ candoId: string; en: string; example: string }[]>([]);
+  const [candoDebug, setCandoDebug] = useState<{
+    stage: number;
+    candos: { candoId: string; en: string; stage: number; isStrategy: boolean; consecutiveSuccess: number; achieved: boolean }[];
+  } | null>(null);
+  const fetchCandoDebug = useCallback(async () => {
+    if (!currentUser) return;
+    try {
+      const res = await fetch(
+        `/api/conversation/candos?userId=${currentUser.id}&language=${currentUser.language}`
+      );
+      const data = await res.json();
+      if (res.ok) setCandoDebug(data);
+    } catch {
+      // debug-only convenience fetch; ignore failures
+    }
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (!debugEnabled || !currentUser) return;
+    // Deferred to a microtask, same pattern as the other debug/watchdog
+    // effects in this file — this reacts to currentUser becoming available,
+    // it's not deriving render state.
+    queueMicrotask(() => {
+      fetchCandoDebug();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debugEnabled, currentUser]);
+
   // "Pending end": the tutor's final line (either a real should_end:true
   // reply, or the fixed FALLBACK_CLOSING_LINE when we force-end) is shown,
   // Listen is pressable, and the user can either tap Continue or wait — the
@@ -135,6 +168,12 @@ export default function ConversationPage() {
 
   const audioPlayer = useAudioPlayer();
 
+  // Step C3: session creation (and mission selection, which happens
+  // server-side as part of "start") now runs when moving from [1] to [2],
+  // not when pressing "Start" on [2] — the missions need to already be
+  // known so the intro screen can display them. The conversation *timer*
+  // (sessionStartedAtRef) is deliberately NOT started here; that happens in
+  // enterConversation() below, only once the user actually presses "Start".
   const startSession = useCallback(async () => {
     if (!currentUser || !selectedScenario || !selectedDurationMin) return;
     setBusy(true);
@@ -163,19 +202,56 @@ export default function ConversationPage() {
       setLastTranscriptEn(null);
       setRetryNotice(null);
       setPlannedDurationSec(selectedDurationMin * 60);
-      sessionStartedAtRef.current = Date.now();
-      setElapsedDisplaySec(0);
+      setMissions((data.missions as { candoId: string; en: string; example: string }[]) ?? []);
       setTimingLog([
         `turn 0: support_given=${data.supportGiven ?? "null"} response_quality=${data.responseQuality ?? "null"}`,
+        `missions selected: ${
+          (data.missions ?? []).length === 0
+            ? "(none)"
+            : (data.missions as { candoId: string; en: string }[])
+                .map((m) => `${m.candoId} (${m.en})`)
+                .join(", ")
+        } / conversationStage=${data.conversationStage}`,
       ]);
       setPendingEnd(false);
-      setPhase("conversation");
+      setPhase("intro");
     } catch (e) {
       setErrorMessage(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   }, [currentUser, selectedScenario, selectedDurationMin]);
+
+  // The actual "Start" tap on [2]: no network call, just starts the timer
+  // and switches to the conversation screen. Session + missions + opening
+  // line were already created by startSession() above.
+  const enterConversation = useCallback(() => {
+    sessionStartedAtRef.current = Date.now();
+    setElapsedDisplaySec(0);
+    setPhase("conversation");
+  }, []);
+
+  // [2] "← Choose a different topic": since startSession() (above) already
+  // created the session + selected missions by this point, going back
+  // without marking it abandoned would leave an active, 0-turn session
+  // around forever — which is exactly the "mission selected but no
+  // opportunity happened" case that could wrongly reset can-do progress if
+  // it were ever picked up by judgment. Fire-and-forget: this is a cleanup
+  // best-effort, not something the user should have to wait on.
+  const backToSelect = useCallback(() => {
+    if (sessionId) {
+      fetch("/api/conversation/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "abandon", sessionId }),
+      }).catch(() => {
+        // best-effort cleanup; nothing the user can do about a failure here
+      });
+    }
+    setSessionId(null);
+    setMissions([]);
+    setPhase("select");
+  }, [sessionId]);
 
   const endSession = useCallback(async () => {
     if (!sessionId) return;
@@ -190,13 +266,14 @@ export default function ConversationPage() {
       });
       const data = await res.json();
       setResult(data);
+      if (debugEnabled) fetchCandoDebug();
     } catch (e) {
       setResult({ error: e instanceof Error ? e.message : String(e) });
     } finally {
       setBusy(false);
       setPhase("result");
     }
-  }, [sessionId]);
+  }, [sessionId, debugEnabled, fetchCandoDebug]);
 
   const handleCancel = useCallback(() => {
     if (window.confirm("Quit this conversation?")) {
@@ -501,9 +578,13 @@ export default function ConversationPage() {
             </div>
           </div>
 
+          {errorMessage && (
+            <div style={{ color: "#c00", marginBottom: 16, fontSize: 14 }}>⚠️ {errorMessage}</div>
+          )}
+
           <button
-            onClick={() => selectedScenario && selectedDurationMin && setPhase("intro")}
-            disabled={!selectedScenario || !selectedDurationMin}
+            onClick={startSession}
+            disabled={!selectedScenario || !selectedDurationMin || busy}
             style={{
               width: "100%",
               padding: 16,
@@ -512,10 +593,10 @@ export default function ConversationPage() {
               border: "none",
               background: selectedScenario && selectedDurationMin ? "#ff8c42" : "#eee",
               color: selectedScenario && selectedDurationMin ? "white" : "#aaa",
-              cursor: selectedScenario && selectedDurationMin ? "pointer" : "not-allowed",
+              cursor: selectedScenario && selectedDurationMin && !busy ? "pointer" : "not-allowed",
             }}
           >
-            Next
+            {busy ? busyMessage || "Getting ready..." : "Next"}
           </button>
         </div>
       </main>
@@ -528,7 +609,7 @@ export default function ConversationPage() {
       <main style={containerStyle}>
         <div style={{ padding: 20 }}>
           <button
-            onClick={() => setPhase("select")}
+            onClick={backToSelect}
             style={{ background: "none", border: "none", color: "#888", fontSize: 14, marginBottom: 16, cursor: "pointer", padding: 0 }}
           >
             ← Choose a different topic
@@ -542,19 +623,34 @@ export default function ConversationPage() {
               background: "white",
               borderRadius: 16,
               padding: 24,
-              marginBottom: 24,
+              marginBottom: missions.length > 0 ? 16 : 24,
             }}
           >
             {selectedScenario.intro}
           </div>
 
-          {errorMessage && (
-            <div style={{ color: "#c00", marginBottom: 16, fontSize: 14 }}>⚠️ {errorMessage}</div>
+          {missions.length > 0 && (
+            <div
+              style={{
+                background: "#fff3e6",
+                borderRadius: 12,
+                padding: 16,
+                marginBottom: 24,
+              }}
+            >
+              <div style={{ fontSize: 14, fontWeight: "bold", color: "#a35a00", marginBottom: 8 }}>
+                Today&apos;s missions
+              </div>
+              {missions.map((m) => (
+                <div key={m.candoId} style={{ fontSize: 14, color: "#555", marginBottom: 4 }}>
+                  · {m.en} <span style={{ color: "#aaa" }}>({m.example})</span>
+                </div>
+              ))}
+            </div>
           )}
 
           <button
-            onClick={startSession}
-            disabled={busy}
+            onClick={enterConversation}
             style={{
               width: "100%",
               padding: 16,
@@ -563,10 +659,10 @@ export default function ConversationPage() {
               border: "none",
               background: "#ff8c42",
               color: "white",
-              cursor: busy ? "default" : "pointer",
+              cursor: "pointer",
             }}
           >
-            {busy ? busyMessage || "Getting ready..." : "Start"}
+            Start
           </button>
         </div>
       </main>
@@ -593,6 +689,41 @@ export default function ConversationPage() {
           >
             {JSON.stringify(result, null, 2)}
           </pre>
+
+          {debugEnabled && (
+            <div
+              style={{
+                background: "#f5f5f5",
+                borderRadius: 8,
+                padding: 16,
+                marginBottom: 24,
+                fontSize: 12,
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <div style={{ fontWeight: "bold" }}>
+                  DEBUG: user_candos (stage {candoDebug?.stage ?? "?"})
+                </div>
+                <button
+                  onClick={fetchCandoDebug}
+                  style={{ fontSize: 12, padding: "4px 10px", borderRadius: 6, border: "1px solid #ccc", background: "white", cursor: "pointer" }}
+                >
+                  Refresh
+                </button>
+              </div>
+              <pre style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", margin: 0 }}>
+                {candoDebug
+                  ? candoDebug.candos
+                      .map(
+                        (c) =>
+                          `${c.candoId}${c.isStrategy ? " (strategy)" : ""}: consecutive=${c.consecutiveSuccess} achieved=${c.achieved}`
+                      )
+                      .join("\n")
+                  : "(not loaded — press Refresh)"}
+              </pre>
+            </div>
+          )}
+
           <Link
             href="/"
             style={{

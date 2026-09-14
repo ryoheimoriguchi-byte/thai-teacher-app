@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { buildConversationPrompt } from "@/app/lib/conversation-prompts";
 import { getVocabCategories } from "@/app/lib/conversation-scenarios";
+import { getCando, type ConversationCando } from "@/app/lib/conversation-candos";
 import {
   getSupabaseClient,
   fetchMasteredWords,
@@ -108,12 +109,22 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Step C3: ミッションはセッション開始時に選ばれ、conversation_sessions に
+    // 固定で保存されている。system prompt は毎ターン新規に組み立てられる
+    // （Claude は前のターンの system prompt を覚えていない）ので、ミッションが
+    // ある間は毎ターン注入し直す必要がある — ここで欠けると、最初のターン以降
+    // Claude がミッションの存在を忘れてしまう。
+    const missions: ConversationCando[] = (session.mission_cando_ids ?? [])
+      .map((id: string) => getCando(id))
+      .filter((c): c is ConversationCando => Boolean(c));
+
     const systemPrompt = buildConversationPrompt({
       scenarioId: session.scenario_id,
       studentName,
       masteredWords,
       isOpening: false,
       isClosing,
+      missions,
     });
 
     const nextTurn = await callClaudeForJson<TurnReply>(async () => {

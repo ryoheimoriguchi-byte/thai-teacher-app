@@ -3,16 +3,29 @@ import Anthropic from "@anthropic-ai/sdk";
 import { buildConversationPrompt, buildReviewPrompt } from "@/app/lib/conversation-prompts";
 import { getScenario, getVocabCategories } from "@/app/lib/conversation-scenarios";
 import {
+  ALL_CANDOS,
+  selectMissionCandos,
+  judgeCandos,
+  getCando,
+  type CandoProgressState,
+  type CandoJudgmentEvent,
+} from "@/app/lib/conversation-candos";
+import {
   getSupabaseClient,
   fetchMasteredWords,
   getStudentName,
   createConversationSession,
   getConversationSession,
   completeConversationSession,
+  abandonConversationSession,
   finalizeSessionReview,
   fetchConversationTurns,
   insertConversationTurn,
   updateTurnScoring,
+  fetchUserCandos,
+  upsertUserCando,
+  getOrCreateConversationStage,
+  setConversationStage,
   type ConversationScores,
 } from "@/app/lib/conversation-db";
 import { callClaudeForJson } from "@/app/lib/claude-json";
@@ -77,8 +90,11 @@ export async function POST(req: NextRequest) {
     if (body.action === "end") {
       return await handleEnd(body);
     }
+    if (body.action === "abandon") {
+      return await handleAbandon(body);
+    }
     return NextResponse.json(
-      { error: "action must be 'start' or 'end'" },
+      { error: "action must be 'start', 'end', or 'abandon'" },
       { status: 400 }
     );
   } catch (error: unknown) {
@@ -110,16 +126,29 @@ async function handleStart(body: Record<string, unknown>) {
 
   const supabase = getSupabaseClient();
 
-  const [studentName, masteredWords] = await Promise.all([
+  const [studentName, masteredWords, existingCandos, currentStage] = await Promise.all([
     getStudentName(supabase, userId),
     fetchMasteredWords(supabase, userId, language, getVocabCategories(scenarioId)),
+    fetchUserCandos(supabase, userId, language),
+    getOrCreateConversationStage(supabase, userId, language),
   ]);
+
+  // Step C3: ミッション選定。freetalk は ALL_CANDOS のどの can-do も
+  // scenarioIds に 'freetalk' を含まないため、自然に候補0件 → 空配列になる。
+  const progressByCandoId = new Map<string, CandoProgressState>(
+    existingCandos.map((c) => [
+      c.cando_id,
+      { consecutiveSuccess: c.consecutive_success, achieved: c.achieved },
+    ])
+  );
+  const missions = selectMissionCandos({ scenarioId, currentStage, progressByCandoId });
 
   const session = await createConversationSession(supabase, {
     userId,
     language,
     scenarioId,
     plannedDurationSec,
+    missionCandoIds: missions.map((m) => m.id),
   });
 
   const systemPrompt = buildConversationPrompt({
@@ -128,6 +157,7 @@ async function handleStart(body: Record<string, unknown>) {
     masteredWords,
     isOpening: true,
     isClosing: false,
+    missions,
   });
 
   const opening = await callClaudeForJson<OpeningReply>(() =>
@@ -163,7 +193,26 @@ async function handleStart(body: Record<string, unknown>) {
       title: scenario.title,
       intro: scenario.intro,
     },
+    // Step C3: 場面説明画面 [2] に表示するミッション（英語表記 + 例文）。
+    missions: missions.map((m) => ({ candoId: m.id, en: m.en, example: m.example })),
+    conversationStage: currentStage,
   });
+}
+
+/**
+ * Step C3: [2] 場面説明画面の「← Choose a different topic」で戻ったときに呼ぶ。
+ * 採点・can-do 判定は一切行わない（0ターンのまま単に abandoned にするだけ）。
+ */
+async function handleAbandon(body: Record<string, unknown>) {
+  const sessionId = body.sessionId as string;
+  if (!sessionId) {
+    return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
+  }
+
+  const supabase = getSupabaseClient();
+  await abandonConversationSession(supabase, sessionId);
+
+  return NextResponse.json({ sessionId, status: "abandoned" });
 }
 
 async function handleEnd(body: Record<string, unknown>) {
@@ -197,6 +246,14 @@ async function handleEnd(body: Record<string, unknown>) {
   let highlight: string | null = null;
   let vocabUsedCount = 0;
 
+  // Step C3: can-do 判定結果。振り返り採点（phrases_used / support_given の確定）が
+  // 成功した場合のみ実行する。answeredTurns が0件、または採点自体が失敗した場合は
+  // 判定を行わない（機会があったかどうかの情報が無いまま失敗リセットしてしまうのを防ぐ）。
+  let candoResults: ReturnType<typeof judgeCandos> = [];
+  let missionsResult: { candoId: string; en: string; achieved: boolean }[] = [];
+  let turnsAnsweredAlone = 0;
+  let stageUp = false;
+
   if (answeredTurns.length > 0) {
     try {
       const [studentName, knownVocabulary] = await Promise.all([
@@ -228,12 +285,16 @@ async function handleEnd(body: Record<string, unknown>) {
       for (const turnResult of review.turns) {
         const targetTurn = answeredTurns[turnResult.index - 1];
         if (!targetTurn) continue;
+        const phrasesUsed = turnResult.phrases_used ?? [];
         await updateTurnScoring(supabase, targetTurn.id, {
           scores: turnResult.scores,
-          phrasesUsed: turnResult.phrases_used ?? [],
+          phrasesUsed,
           vocabUsed: turnResult.vocab_used ?? [],
           bonusWords: turnResult.bonus_words ?? [],
         });
+        // ローカルの turns 配列にも反映しておく — can-do 判定はこの後、DB を
+        // 読み直さずにこの配列から phrases_used / support_given を組み立てる。
+        targetTurn.phrases_used = phrasesUsed;
         (turnResult.vocab_used ?? []).forEach((w) => vocabSet.add(w));
       }
       vocabUsedCount = vocabSet.size;
@@ -247,8 +308,82 @@ async function handleEnd(body: Record<string, unknown>) {
         feedbackImprovement,
         highlight,
       });
+
+      // ---- Step C3: can-do 判定 -------------------------------------
+      // 1往復 = turns[i]（生徒の発話 = transcript, phrases_used）+
+      //         turns[i+1]（その発話を受けた先生の返答の support_given）。
+      // transcript と直後の turn 挿入は /turn 内で同じリクエストの中で
+      // 一緒に行われるため、transcript がある turn には必ず i+1 が存在する。
+      const events: CandoJudgmentEvent[] = [];
+      for (let i = 0; i < turns.length - 1; i++) {
+        if (!turns[i].transcript) continue;
+        events.push({
+          phrasesUsed: turns[i].phrases_used ?? [],
+          supportGiven: turns[i + 1].support_given,
+        });
+      }
+      turnsAnsweredAlone = events.filter((e) => e.supportGiven === "none").length;
+
+      const existingCandos = await fetchUserCandos(supabase, session.user_id, session.language);
+      const progressByCandoId = new Map<string, CandoProgressState>(
+        existingCandos.map((c) => [
+          c.cando_id,
+          { consecutiveSuccess: c.consecutive_success, achieved: c.achieved },
+        ])
+      );
+
+      candoResults = judgeCandos({
+        events,
+        missionCandoIds: session.mission_cando_ids ?? [],
+        progressByCandoId,
+      });
+
+      const now = new Date().toISOString();
+      for (const r of candoResults) {
+        await upsertUserCando(supabase, {
+          userId: session.user_id,
+          language: session.language,
+          candoId: r.candoId,
+          consecutiveSuccess: r.after,
+          achieved: r.achieved,
+          achievedAt: r.justAchieved ? now : r.achieved ? now : null,
+          lastPracticed: now,
+        });
+      }
+
+      missionsResult = (session.mission_cando_ids ?? []).map((candoId) => {
+        const cando = getCando(candoId);
+        const changed = candoResults.find((r) => r.candoId === candoId);
+        const alreadyAchieved = progressByCandoId.get(candoId)?.achieved ?? false;
+        return {
+          candoId,
+          en: cando?.en ?? candoId,
+          achieved: changed ? changed.achieved : alreadyAchieved,
+        };
+      });
+
+      // ---- Stage 解放判定（100%。語彙側の90%とは異なる） --------------
+      const currentStage = await getOrCreateConversationStage(
+        supabase,
+        session.user_id,
+        session.language
+      );
+      const stageCandos = ALL_CANDOS.filter((c) => c.stage === currentStage);
+      if (stageCandos.length > 0) {
+        const allAchieved = stageCandos.every((c) => {
+          const changed = candoResults.find((r) => r.candoId === c.id);
+          if (changed) return changed.achieved;
+          return progressByCandoId.get(c.id)?.achieved ?? false;
+        });
+        // Stage 3 以降は can-do 未定義（このファイルは Stage 1-2 のみ扱う）。
+        if (allAchieved && currentStage < 2) {
+          await setConversationStage(supabase, session.user_id, session.language, currentStage + 1);
+          stageUp = true;
+        }
+      }
     } catch (reviewError) {
       // 指示書どおり: 採点に失敗してもセッションは completed のまま、reviewed=false で残す。
+      // can-do 判定も、phrases_used / support_given が確定していない以上ここでは行わない。
       console.error(
         `Conversation review failed for session ${sessionId}; left unreviewed:`,
         reviewError
@@ -260,6 +395,13 @@ async function handleEnd(body: Record<string, unknown>) {
     }
   }
 
+  // デバッグパネル表示用。can-do 判定の成否にかかわらず、常に最新値を返す。
+  const conversationStage = await getOrCreateConversationStage(
+    supabase,
+    session.user_id,
+    session.language
+  );
+
   return NextResponse.json({
     sessionId,
     speakingMs: session.speaking_ms,
@@ -268,5 +410,18 @@ async function handleEnd(body: Record<string, unknown>) {
     feedbackPositive,
     feedbackImprovement,
     highlight,
+    // Step C3 (Step C4 の振り返り画面が使う。今は生 JSON のまま表示)
+    turnsAnsweredAlone,
+    turnsTotal: answeredTurns.length,
+    missions: missionsResult,
+    candoProgress: candoResults.map((r) => ({
+      candoId: r.candoId,
+      en: getCando(r.candoId)?.en ?? r.candoId,
+      before: r.before,
+      after: r.after,
+      justAchieved: r.justAchieved,
+    })),
+    stageUp,
+    conversationStage,
   });
 }

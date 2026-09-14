@@ -257,6 +257,143 @@ const FAMILY_PHRASES: ConversationPhrase[] = [
 ];
 
 /* ------------------------------------------------------------------ */
+/* シナリオ D: がっこうの はなし                                        */
+/* ------------------------------------------------------------------ */
+
+const SCHOOL_PHRASES: ConversationPhrase[] = [
+  {
+    id: 'P-08',
+    kind: 'template',
+    ja: '〜を つかいます',
+    en: 'I use ~',
+    slots: ['School'],
+    variants: ['〜が あります', '〜を もっています'],
+  },
+  {
+    id: 'P-09',
+    kind: 'template',
+    ja: 'がっこうで 〜します',
+    en: 'I ~ at school',
+    slots: ['School', 'Common Verbs'],
+    variants: ['がっこうで 〜する'],
+  },
+  {
+    id: 'P-10',
+    kind: 'card',
+    ja: 'ともだち / せんせい',
+    en: 'Friend / Teacher',
+    cardWords: ['ともだち', 'せんせい'],
+    variants: ['ともだちが', 'せんせいは'],
+  },
+];
+
+/* ------------------------------------------------------------------ */
+/* シナリオ E: たべものの はなし                                        */
+/* ------------------------------------------------------------------ */
+
+const FOOD_PHRASES: ConversationPhrase[] = [
+  {
+    id: 'P-06',
+    kind: 'template',
+    ja: '〜は すきじゃない',
+    en: "I don't like ~",
+    slots: ['Food'],
+    variants: ['〜は きらい', '〜は ちょっと'],
+  },
+  {
+    id: 'P-07',
+    kind: 'template',
+    ja: '〜が たべたい',
+    en: 'I want to eat ~',
+    slots: ['Food'],
+    variants: ['〜を たべたい', '〜が いい'],
+  },
+];
+
+/* ------------------------------------------------------------------ */
+/* 共通フレーズ（特定のシナリオに紐づかない。can-do の一部は現時点で        */
+/* 対応するシナリオが無いため、ここに置いて ALL_PHRASES にだけ載せる）      */
+/* ------------------------------------------------------------------ */
+
+const COMMON_PHRASES: ConversationPhrase[] = [
+  {
+    id: 'P-01',
+    kind: 'card',
+    ja: 'わかりません',
+    en: "I don't understand",
+    cardWords: ['わかりません', 'しりません'],
+    variants: ['わからない', 'わかんない'],
+  },
+  {
+    id: 'P-02',
+    kind: 'card',
+    ja: 'もういちど いってください',
+    en: 'Please say it again',
+    cardWords: ['もういちどいってください', 'ゆっくりいってください', 'まってください'],
+    variants: ['もういちど', 'ゆっくり いってください', 'まってください'],
+  },
+  {
+    id: 'P-03',
+    kind: 'template',
+    ja: 'わたしは 〜です',
+    en: 'I am ~',
+    variants: ['〜です', 'なまえは 〜です'],
+    note: '枠は生徒自身の名前（cards のカテゴリではない）。名前を言えていれば達成。',
+  },
+  {
+    id: 'P-04',
+    kind: 'card',
+    ja: 'なに / どこ / いつ',
+    en: 'What / Where / When',
+    cardWords: ['なに', 'どこ', 'いつ'],
+    variants: ['なんですか', 'どこですか', 'いつですか'],
+  },
+  {
+    id: 'P-05',
+    kind: 'card',
+    ja: 'つかれた / おなかがすいた / げんき',
+    en: "I'm tired / hungry / fine",
+    cardWords: ['つかれた', 'おなかがすいた', 'げんき'],
+    variants: ['つかれました', 'おなか すいた', 'げんきです'],
+  },
+  // 以下は Stage 2 の can-do (play / daily / out) に対応するフレーズ。
+  // 現時点で専用シナリオが無いため、ミッションとしては提示されないが、
+  // 判定（ALL_PHRASES）には常に含める。偶然使えた場合は加点される。
+  {
+    id: 'P-11',
+    kind: 'template',
+    ja: '〜して あそびます',
+    en: 'I play by ~',
+    slots: ['Common Verbs'],
+    variants: ['〜して あそぶ', '〜が すき'],
+  },
+  {
+    id: 'P-12',
+    kind: 'template',
+    ja: 'きょうは 〜ようびです',
+    en: 'Today is ~day',
+    slots: ['Dates & Time'],
+    variants: ['きょう 〜ようび'],
+  },
+  {
+    id: 'P-13',
+    kind: 'template',
+    ja: 'あさ / よる に 〜します',
+    en: 'I ~ in the morning / at night',
+    slots: ['Dates & Time', 'Common Verbs'],
+    variants: ['あさ 〜する', 'よる 〜する'],
+  },
+  {
+    id: 'P-14',
+    kind: 'template',
+    ja: 'きょうは はれ / あめ です',
+    en: "It's sunny / rainy today",
+    slots: ['Weather'],
+    variants: ['はれ', 'あめ', 'あついです', 'さむいです'],
+  },
+];
+
+/* ------------------------------------------------------------------ */
 /* シナリオ定義                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -282,6 +419,34 @@ export const SCENARIOS: ConversationScenario[] = [
     vocabCategories: ['Family', 'Adjectives', 'Greetings', 'Useful Phrases', 'Common Verbs'],
   },
   {
+    id: 'school',
+    title: 'がっこうの はなし',
+    titleEn: 'Talking about school',
+    intro: 'きょう がっこうで あったことを はなそう。',
+    tutorRole: 'にほんごの せんせい',
+    clearThreshold: 0.7,
+    phrases: SCHOOL_PHRASES,
+    vocabCategories: [
+      'School',
+      'Common Verbs',
+      'Dates & Time',
+      'Adjectives',
+      'Greetings',
+      'Useful Phrases',
+      'Places',
+    ],
+  },
+  {
+    id: 'food',
+    title: 'たべものの はなし',
+    titleEn: 'Talking about food',
+    intro: 'すきな たべものの はなしを しよう。',
+    tutorRole: 'にほんごの せんせい',
+    clearThreshold: 0.7,
+    phrases: FOOD_PHRASES,
+    vocabCategories: ['Food', 'Adjectives', 'Common Verbs', 'Health & Body', 'Greetings', 'Useful Phrases'],
+  },
+  {
     id: 'freetalk',
     title: 'なんでも おしゃべり',
     titleEn: 'Free talk',
@@ -304,7 +469,9 @@ export const SCENARIOS: ConversationScenario[] = [
  */
 export const ALL_PHRASES: ConversationPhrase[] = Array.from(
   new Map(
-    SCENARIOS.flatMap((s) => s.phrases).map((p) => [p.ja, p] as const)
+    [...SCENARIOS.flatMap((s) => s.phrases), ...COMMON_PHRASES].map(
+      (p) => [p.ja, p] as const
+    )
   ).values()
 );
 

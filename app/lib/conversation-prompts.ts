@@ -7,6 +7,7 @@
  */
 
 import { ALL_PHRASES, getScenario, type ConversationPhrase } from './conversation-scenarios';
+import type { ConversationCando } from './conversation-candos';
 
 export const TUTOR_NAME = 'みどりせんせい';
 
@@ -80,6 +81,22 @@ const SCENARIO_INSTRUCTIONS: Record<string, string> = {
 
 生徒が話したいことを話し始めたら、そちらに完全についていってください。
 話題を管理しようとしないこと。
+`.trim(),
+
+  school: `
+## この会話の場面
+学校でのできごとを聞いてください。あなたは先生のまま、役を演じません。
+
+一度に1つずつ聞くこと。「なにを した？」「だれと いた？」「たのしかった？」のように具体的に聞いてください。
+生徒が話したいことを話し始めたら、そちらについていってください。
+`.trim(),
+
+  food: `
+## この会話の場面
+好きな食べもの、嫌いな食べもの、食べたいものについて聞いてください。あなたは先生のまま、役を演じません。
+
+「なにが すき？」「きょう なにを たべた？」のように聞いてください。
+買い物シナリオとは違い、買うのではなく食べる話をしてください。
 `.trim(),
 };
 
@@ -188,6 +205,32 @@ export const FALLBACK_CLOSING_LINE = {
   en: "That's it for today! Thank you, let's talk again.",
 };
 
+/**
+ * can-do.ja は必ず「〜することができる」で終わる定義文なので、そこを削って
+ * ミッション表示用の短い動詞形にする（例: 「ほしい数を言うことができる」→
+ * 「ほしい数を言う」）。指示書のサンプル表記に合わせるための変換。
+ */
+function candoActionLabel(ja: string): string {
+  return ja.endsWith('ことができる') ? ja.slice(0, -'ことができる'.length) : ja;
+}
+
+function buildMissionInstruction(missions: ConversationCando[]): string {
+  if (missions.length === 0) return '';
+  const lines = missions
+    .map((m, i) => `${i + 1}. ${candoActionLabel(m.ja)}（例: ${m.example}）`)
+    .join('\n');
+  return `
+## きょうの ミッション
+この会話のなかで、生徒が次の表現を使う機会を必ず作ってください。
+
+${lines}
+
+機会を作るとは、生徒がその表現を使いたくなる質問や場面を出すことです。
+ただし「〜と言ってください」と直接指示してはいけません。
+生徒が使わなくても、責めたり催促したりしないでください。
+`.trim();
+}
+
 export interface ConversationPromptOptions {
   scenarioId: string;
   studentName: string;
@@ -197,6 +240,8 @@ export interface ConversationPromptOptions {
   isOpening: boolean;
   /** 残り時間が45秒を切ったか */
   isClosing: boolean;
+  /** このセッションで提示するミッション（0〜2件）。freetalk では常に空配列。 */
+  missions?: ConversationCando[];
 }
 
 export function buildConversationPrompt(o: ConversationPromptOptions): string {
@@ -220,6 +265,7 @@ export function buildConversationPrompt(o: ConversationPromptOptions): string {
 
   if (o.isOpening) parts.push(OPENING_INSTRUCTION);
   if (o.isClosing) parts.push(CLOSING_INSTRUCTION);
+  if (o.missions && o.missions.length > 0) parts.push(buildMissionInstruction(o.missions));
 
   parts.push(o.isOpening ? OUTPUT_FORMAT : OUTPUT_FORMAT_WITH_TRANSCRIPT);
 

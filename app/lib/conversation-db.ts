@@ -29,8 +29,23 @@ export type ConversationSessionRow = {
   feedback_positive: string | null;
   feedback_improvement: string | null;
   highlight: string | null;
+  /** そのセッションで提示した can-do ミッションの id 配列（Step C3）。freetalk は常に []。 */
+  mission_cando_ids: string[];
   started_at: string;
   ended_at: string | null;
+  created_at: string;
+};
+
+export type UserCandoRow = {
+  id: string;
+  user_id: string;
+  language: string;
+  cando_id: string;
+  consecutive_success: number;
+  achieved: boolean;
+  achieved_at: string | null;
+  last_practiced: string | null;
+  updated_at: string;
   created_at: string;
 };
 
@@ -134,6 +149,8 @@ export async function createConversationSession(
     language: string;
     scenarioId: string;
     plannedDurationSec: number;
+    /** Step C3: このセッションで提示する can-do ミッション。freetalk では [] を渡す。 */
+    missionCandoIds?: string[];
   }
 ): Promise<ConversationSessionRow> {
   const { data, error } = await supabase
@@ -143,6 +160,7 @@ export async function createConversationSession(
       language: params.language,
       scenario_id: params.scenarioId,
       planned_duration_sec: params.plannedDurationSec,
+      mission_cando_ids: params.missionCandoIds ?? [],
     })
     .select()
     .single();
@@ -194,6 +212,29 @@ export async function completeConversationSession(
       actual_duration_sec: params.actualDurationSec,
     })
     .eq("id", sessionId);
+
+  if (error) throw error;
+}
+
+/**
+ * Step C3: 場面説明画面 [2] から「← Choose a different topic」で戻った際に呼ぶ。
+ * ミッションが選定済み（mission_cando_ids が非空になり得る）のに 0ターンで終わる
+ * セッションが active のまま溜まると、can-do 判定の対象として拾われた場合に
+ * 「機会がなかったのにリセットされる」誤判定を招くため、明示的に abandoned にする。
+ * 冪等（既に active でなくなっていても無害な update）。
+ */
+export async function abandonConversationSession(
+  supabase: SupabaseClient,
+  sessionId: string
+): Promise<void> {
+  const { error } = await supabase
+    .from("conversation_sessions")
+    .update({
+      status: "abandoned",
+      ended_at: new Date().toISOString(),
+    })
+    .eq("id", sessionId)
+    .eq("status", "active"); // 既に completed/abandoned なら上書きしない
 
   if (error) throw error;
 }
@@ -310,6 +351,108 @@ export async function updateTurnScoring(
       bonus_words: params.bonusWords,
     })
     .eq("id", turnId);
+
+  if (error) throw error;
+}
+
+/* ------------------------------------------------------------------ */
+/* user_candos / 会話 Stage（Step C3）                                 */
+/* ------------------------------------------------------------------ */
+
+export async function fetchUserCandos(
+  supabase: SupabaseClient,
+  userId: string,
+  language: string
+): Promise<UserCandoRow[]> {
+  const { data, error } = await supabase
+    .from("user_candos")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("language", language);
+
+  if (error) throw error;
+  return (data as UserCandoRow[]) ?? [];
+}
+
+/**
+ * word_progress と同じ「都度アップサート」の形。cando_id 単位で
+ * consecutive_success / achieved を丸ごと書き換える（差分更新ではない）。
+ */
+export async function upsertUserCando(
+  supabase: SupabaseClient,
+  params: {
+    userId: string;
+    language: string;
+    candoId: string;
+    consecutiveSuccess: number;
+    achieved: boolean;
+    achievedAt: string | null;
+    lastPracticed: string;
+  }
+): Promise<void> {
+  const { error } = await supabase.from("user_candos").upsert(
+    {
+      user_id: params.userId,
+      language: params.language,
+      cando_id: params.candoId,
+      consecutive_success: params.consecutiveSuccess,
+      achieved: params.achieved,
+      achieved_at: params.achievedAt,
+      last_practiced: params.lastPracticed,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "user_id,language,cando_id" }
+  );
+
+  if (error) throw error;
+}
+
+const CONVERSATION_STAGE_MODULE = "conversation";
+
+/** module='conversation' の現在の Stage。レコードが無ければ Stage 1 で作成する。 */
+export async function getOrCreateConversationStage(
+  supabase: SupabaseClient,
+  userId: string,
+  language: string
+): Promise<number> {
+  const { data, error } = await supabase
+    .from("user_module_stages")
+    .select("current_stage")
+    .eq("user_id", userId)
+    .eq("language", language)
+    .eq("module", CONVERSATION_STAGE_MODULE)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (data) return data.current_stage as number;
+
+  const { data: created, error: insertError } = await supabase
+    .from("user_module_stages")
+    .insert({
+      user_id: userId,
+      language,
+      module: CONVERSATION_STAGE_MODULE,
+      current_stage: 1,
+    })
+    .select("current_stage")
+    .single();
+
+  if (insertError) throw insertError;
+  return created.current_stage as number;
+}
+
+export async function setConversationStage(
+  supabase: SupabaseClient,
+  userId: string,
+  language: string,
+  newStage: number
+): Promise<void> {
+  const { error } = await supabase
+    .from("user_module_stages")
+    .update({ current_stage: newStage, updated_at: new Date().toISOString() })
+    .eq("user_id", userId)
+    .eq("language", language)
+    .eq("module", CONVERSATION_STAGE_MODULE);
 
   if (error) throw error;
 }
