@@ -188,6 +188,15 @@ export default function ConversationPage() {
 
   const audioPlayer = useAudioPlayer();
 
+  // Mic/AudioContext pre-warming (done on the [2] intro screen's "Start" tap,
+  // itself a user gesture, so it can request mic permission AND unlock
+  // playback ahead of time) — see enterConversation() below. State here is
+  // read by the ?debug=1 panel only; never shown in the normal UI.
+  const [micPermission, setMicPermission] = useState<"unknown" | "granted" | "denied">("unknown");
+  const [audioCtxState, setAudioCtxState] = useState<"unknown" | "running" | "suspended">("unknown");
+  const [introError, setIntroError] = useState<string | null>(null);
+  const [preparingStart, setPreparingStart] = useState(false);
+
   // Chat-style layout (#5): auto-scroll to the newest message whenever the
   // chat log grows (a new tutor reply, a new student line, or the pending
   // cancel-grace bubble appearing/disappearing).
@@ -255,14 +264,55 @@ export default function ConversationPage() {
     }
   }, [currentUser, selectedScenario, selectedDurationMin]);
 
-  // The actual "Start" tap on [2]: no network call, just starts the timer
-  // and switches to the conversation screen. Session + missions + opening
-  // line were already created by startSession() above.
+  // The "Start" tap on [2]. No conversation network call here (session +
+  // missions + opening line were already created by startSession() above) —
+  // instead, this is where mic permission and TTS playback get unlocked,
+  // since this tap is itself a user gesture.
+  //
+  // Previously, the FIRST recording tap on the conversation screen did
+  // double duty as both "get mic permission" and "unlock AudioContext for
+  // TTS", which was confusing for a first-time child user: the permission
+  // dialog would pop up mid-recording, and the tutor's voice couldn't be
+  // played until it was dismissed. Doing both here means both are already
+  // resolved by the time the conversation screen appears.
   const enterConversation = useCallback(() => {
-    sessionStartedAtRef.current = Date.now();
-    setElapsedDisplaySec(0);
-    setPhase("conversation");
-  }, []);
+    setIntroError(null);
+    setPreparingStart(true);
+
+    // Must be called synchronously in this click handler, before any
+    // `await` below — see the doc comment on useAudioPlayer's unlock() for
+    // why the ctx.resume() call itself needs to happen inside the user
+    // gesture on iOS Safari.
+    const unlockPromise = audioPlayer.unlock();
+
+    (async () => {
+      // Mic permission: request-then-immediately-release. This call is only
+      // to trigger/resolve the permission prompt ahead of time; it must NOT
+      // hold the stream open (an iOS mic-in-use indicator lit for the whole
+      // conversation would be alarming). The actual recording still calls
+      // getUserMedia again for real, per recording, in use-recorder.ts.
+      try {
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStream.getTracks().forEach((t) => t.stop());
+        setMicPermission("granted");
+      } catch {
+        setMicPermission("denied");
+        setIntroError(
+          "Microphone access is needed to talk. Please allow it in Safari settings."
+        );
+        setPreparingStart(false);
+        return; // stay on the intro screen — don't enter a conversation the mic can't drive
+      }
+
+      const state = await unlockPromise;
+      setAudioCtxState(state);
+
+      sessionStartedAtRef.current = Date.now();
+      setElapsedDisplaySec(0);
+      setPreparingStart(false);
+      setPhase("conversation");
+    })();
+  }, [audioPlayer]);
 
   // [2] "← Choose a different topic": since startSession() (above) already
   // created the session + selected missions by this point, going back
@@ -283,6 +333,7 @@ export default function ConversationPage() {
     }
     setSessionId(null);
     setMissions([]);
+    setIntroError(null);
     setPhase("select");
   }, [sessionId]);
 
@@ -746,8 +797,13 @@ export default function ConversationPage() {
             </div>
           )}
 
+          {introError && (
+            <div style={{ color: "#c00", marginBottom: 16, fontSize: 14 }}>⚠️ {introError}</div>
+          )}
+
           <button
             onClick={enterConversation}
+            disabled={preparingStart}
             style={{
               width: "100%",
               padding: 16,
@@ -756,10 +812,11 @@ export default function ConversationPage() {
               border: "none",
               background: "#ff8c42",
               color: "white",
-              cursor: "pointer",
+              cursor: preparingStart ? "default" : "pointer",
+              opacity: preparingStart ? 0.7 : 1,
             }}
           >
-            Start
+            {preparingStart ? "Getting ready..." : "Start"}
           </button>
         </div>
       </main>
@@ -1166,6 +1223,8 @@ export default function ConversationPage() {
           elapsedSec={elapsedDisplaySec}
           plannedDurationSec={plannedDurationSec}
           timingLog={timingLog}
+          micPermission={micPermission}
+          audioCtxState={audioCtxState}
         />
       )}
     </main>
@@ -1185,6 +1244,8 @@ function DebugPanel(props: {
   elapsedSec: number;
   plannedDurationSec: number;
   timingLog: string[];
+  micPermission: "unknown" | "granted" | "denied";
+  audioCtxState: "unknown" | "running" | "suspended";
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -1210,6 +1271,9 @@ function DebugPanel(props: {
             elapsed: {props.elapsedSec.toFixed(0)}s / planned: {props.plannedDurationSec}s / remaining:{" "}
             {(props.plannedDurationSec - props.elapsedSec).toFixed(0)}s / isClosing now:{" "}
             {String(props.plannedDurationSec - props.elapsedSec <= CLOSING_THRESHOLD_SEC)}
+          </div>
+          <div style={{ marginBottom: 8, fontWeight: "bold" }}>
+            mic: {props.micPermission} / audio: {props.audioCtxState}
           </div>
           <div
             style={{

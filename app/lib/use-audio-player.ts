@@ -155,5 +155,32 @@ export function useAudioPlayer() {
     }
   }, []);
 
-  return { state, error, play };
+  /**
+   * Unlocks the AudioContext (creates it if needed and calls resume()) WITHOUT
+   * playing anything. Added so the intro screen's "Start" tap — itself a user
+   * gesture — can pre-unlock playback before the conversation screen is even
+   * shown, instead of overloading the first recording tap with "also unlock
+   * audio". Must be called synchronously within the click handler (i.e. the
+   * caller must not `await` anything before calling this) for the same
+   * iOS-Safari-gesture reason documented on `play()` above: the ctx.resume()
+   * call itself (not the awaiting of its result) is what needs to happen
+   * inside the gesture's synchronous call stack.
+   */
+  const unlock = useCallback((): Promise<"running" | "suspended" | "unknown"> => {
+    try {
+      const Ctx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!ctxRef.current) ctxRef.current = new Ctx();
+      const ctx = ctxRef.current;
+      return ctx
+        .resume()
+        .then(() => ctx.state as "running" | "suspended")
+        .catch(() => "unknown" as const);
+    } catch {
+      return Promise.resolve("unknown");
+    }
+  }, []);
+
+  return { state, error, play, unlock };
 }
