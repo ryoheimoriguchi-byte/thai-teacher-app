@@ -72,10 +72,6 @@ const SESSION_END_TIMEOUT_MS = 35000;
 const TRANSCRIBE_TIMEOUT_MS = 20000;
 const TURN_TIMEOUT_MS = 20000;
 
-// Mis-send cancel grace (#4): how long "Not what I said" stays visible
-// after a transcript comes back, before automatically sending it.
-const CANCEL_GRACE_MS = 2500;
-
 export default function ConversationPage() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [debugEnabled] = useState(() => {
@@ -126,29 +122,11 @@ export default function ConversationPage() {
   // /turn call itself failed, not /transcribe). Distinct from errorMessage
   // so we can show explicit recovery actions instead of a bare error line.
   const [turnError, setTurnError] = useState<string | null>(null);
-  // Mis-send cancel grace (#4): the just-transcribed line, shown as a chat
-  // bubble with a "Not what I said" escape hatch, BEFORE /turn is ever
-  // called — nothing about this turn is persisted server-side yet at this
-  // point, so canceling here is always clean. If not canceled within
-  // CANCEL_GRACE_MS, sendTurn() fires automatically (no required tap).
-  const [pendingUserTurn, setPendingUserTurn] = useState<{
-    transcript: string;
-    transcriptKana: string;
-    totalMs: number;
-  } | null>(null);
-  const [cancelGraceMsRemaining, setCancelGraceMsRemaining] = useState(0);
-  const cancelGraceTimeoutRef = useRef<number | null>(null);
-  const cancelGraceIntervalRef = useRef<number | null>(null);
-  const clearCancelGraceTimers = useCallback(() => {
-    if (cancelGraceTimeoutRef.current) {
-      window.clearTimeout(cancelGraceTimeoutRef.current);
-      cancelGraceTimeoutRef.current = null;
-    }
-    if (cancelGraceIntervalRef.current) {
-      window.clearInterval(cancelGraceIntervalRef.current);
-      cancelGraceIntervalRef.current = null;
-    }
-  }, []);
+  // Fix 2 (2026-09-19): "Not what I said" is now a persistent, no-time-limit
+  // control next to the most recent student bubble (see undoLastTurn below),
+  // replacing an earlier timed pre-send cancel window that was too easy to
+  // miss while scrolling. true while that undo request is in flight.
+  const [undoInFlight, setUndoInFlight] = useState(false);
 
   // ?debug=1 panel: elapsed time / isClosing bookkeeping, so this can be
   // verified on a real device without guessing.
@@ -166,6 +144,13 @@ export default function ConversationPage() {
   // moving from [1] to [2] (not when pressing "Start") so the missions are
   // known before the intro screen is shown.
   const [missions, setMissions] = useState<{ candoId: string; en: string; example: string }[]>([]);
+  // Fix 1: provisional, display-only "used" state per mission, ticked from
+  // each turn's missions_used (Claude's own judgment for that turn). NOT
+  // authoritative — the real judgment happens at session end (judgeCandos),
+  // and can differ (see conversation-candos.ts doc comment). Once a mission
+  // is ticked here it stays ticked for the rest of the session, even if a
+  // later turn's provisional judgment doesn't repeat it.
+  const [missionsUsedIds, setMissionsUsedIds] = useState<Set<string>>(new Set());
   const [candoDebug, setCandoDebug] = useState<{
     stage: number;
     candos: { candoId: string; en: string; stage: number; isStrategy: boolean; consecutiveSuccess: number; achieved: boolean }[];
@@ -211,7 +196,7 @@ export default function ConversationPage() {
   useEffect(() => {
     if (phase !== "conversation") return;
     chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [phase, history.length, currentTurn, pendingUserTurn]);
+  }, [phase, history.length, currentTurn]);
 
   // Step C3: session creation (and mission selection, which happens
   // server-side as part of "start") now runs when moving from [1] to [2],
@@ -247,10 +232,10 @@ export default function ConversationPage() {
       setCurrentTurn({ tutorText: data.tutorText, tutorTextEn: data.tutorTextEn });
       setHistory([]);
       setExpandedTranslations(new Set());
-      setPendingUserTurn(null);
       setRetryNotice(null);
       setPlannedDurationSec(selectedDurationMin * 60);
       setMissions((data.missions as { candoId: string; en: string; example: string }[]) ?? []);
+      setMissionsUsedIds(new Set());
       setTimingLog([
         `turn 0: support_given=${data.supportGiven ?? "null"} response_quality=${data.responseQuality ?? "null"}`,
         `missions selected: ${
@@ -357,9 +342,7 @@ export default function ConversationPage() {
   useEffect(() => {
     return () => {
       if (pendingEndTimeoutRef.current) window.clearTimeout(pendingEndTimeoutRef.current);
-      clearCancelGraceTimers();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Live ticking clock for the debug panel + the force-end safety net below.
@@ -409,12 +392,10 @@ export default function ConversationPage() {
     }, []),
   });
 
-  // The actual /turn call, extracted so it can be invoked either
-  // immediately or after the mis-send cancel grace window (#4) elapses.
+  // The actual /turn call.
   const sendTurn = useCallback(
     async (transcript: string, transcriptKana: string, totalMs: number) => {
       if (!sessionId || !currentTurn) return;
-      setPendingUserTurn(null);
       setBusy(true);
       setBusyMessage("The teacher is thinking...");
 
@@ -457,8 +438,18 @@ export default function ConversationPage() {
         ]);
         setCurrentTurn({ tutorText: turnData.tutorText, tutorTextEn: turnData.tutorTextEn });
         addTimingLog(
-          `turn ${turnData.turnIndex}: support_given=${turnData.supportGiven ?? "null"} response_quality=${turnData.responseQuality ?? "null"}`
+          `turn ${turnData.turnIndex}: support_given=${turnData.supportGiven ?? "null"} response_quality=${turnData.responseQuality ?? "null"}` +
+            (Array.isArray(turnData.missionsUsed) && turnData.missionsUsed.length > 0
+              ? ` missions_used=${turnData.missionsUsed.join(",")}`
+              : "")
         );
+        if (Array.isArray(turnData.missionsUsed) && turnData.missionsUsed.length > 0) {
+          setMissionsUsedIds((prev) => {
+            const next = new Set(prev);
+            for (const id of turnData.missionsUsed as string[]) next.add(id);
+            return next;
+          });
+        }
         recorder.reset();
         setBusy(false);
 
@@ -493,16 +484,6 @@ export default function ConversationPage() {
     },
     [sessionId, currentTurn, plannedDurationSec, enterPendingEnd, addTimingLog, recorder]
   );
-
-  // Cancels the mis-send grace window (#4): discards the just-transcribed
-  // line (never sent to /turn, so nothing was persisted) and gets the mic
-  // ready for a new recording.
-  const cancelPendingUserTurn = useCallback(() => {
-    clearCancelGraceTimers();
-    setPendingUserTurn(null);
-    setCancelGraceMsRemaining(0);
-    recorder.reset();
-  }, [clearCancelGraceTimers, recorder]);
 
   const handleRecordingComplete = useCallback(
     async (blob: Blob, mimeType: string, totalMs: number) => {
@@ -572,26 +553,46 @@ export default function ConversationPage() {
         return;
       }
 
-      // Mis-send cancel grace (#4): show the transcript as a pending chat
-      // bubble with a "Not what I said" escape hatch, before calling /turn
-      // at all. No required tap — if the window elapses without a cancel,
-      // sendTurn() fires on its own so the conversation tempo isn't
-      // interrupted for the (common) case where the transcript is correct.
-      setBusy(false);
-      setPendingUserTurn({ transcript, transcriptKana, totalMs });
-      setCancelGraceMsRemaining(CANCEL_GRACE_MS);
-      clearCancelGraceTimers();
-      const graceStartedAt = Date.now();
-      cancelGraceIntervalRef.current = window.setInterval(() => {
-        setCancelGraceMsRemaining(Math.max(0, CANCEL_GRACE_MS - (Date.now() - graceStartedAt)));
-      }, 100);
-      cancelGraceTimeoutRef.current = window.setTimeout(() => {
-        clearCancelGraceTimers();
-        sendTurn(transcript, transcriptKana, totalMs);
-      }, CANCEL_GRACE_MS);
+      // Send immediately — mis-send recovery (#4/Fix 2) is now a persistent
+      // "Not what I said" undo control shown after the fact (see
+      // undoLastTurn below), not a pre-send delay.
+      await sendTurn(transcript, transcriptKana, totalMs);
     },
-    [sessionId, currentTurn, plannedDurationSec, recorder, enterPendingEnd, addTimingLog, clearCancelGraceTimers, sendTurn]
+    [sessionId, currentTurn, plannedDurationSec, recorder, enterPendingEnd, addTimingLog, sendTurn]
   );
+
+  // Fix 2 (2026-09-19): undoes the single most recent exchange (the last
+  // student utterance + the tutor's reply to it) — see handleUndoLastTurn
+  // on the server for exactly what gets rolled back. Only ever available
+  // for the latest turn, never deeper history.
+  const undoLastTurn = useCallback(async () => {
+    if (!sessionId || history.length === 0 || busy || pendingEnd || undoInFlight) return;
+    setUndoInFlight(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetchWithTimeout(
+        "/api/conversation/session",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "undo_last_turn", sessionId }),
+        },
+        SESSION_START_TIMEOUT_MS
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Undo failed");
+
+      setHistory((prev) => prev.slice(0, -1));
+      setCurrentTurn({ tutorText: data.tutorText, tutorTextEn: data.tutorTextEn });
+      setTurnError(null);
+      setRetryNotice(null);
+      addTimingLog("undo last turn");
+    } catch (e) {
+      setErrorMessage(e instanceof Error ? e.message : String(e));
+    } finally {
+      setUndoInFlight(false);
+    }
+  }, [sessionId, history.length, busy, pendingEnd, undoInFlight, addTimingLog]);
 
   useEffect(() => {
     handleRecordingCompleteRef.current = handleRecordingComplete;
@@ -844,7 +845,7 @@ export default function ConversationPage() {
 
   /* ---------------- [3] conversation (chat-style, #5) ---------------- */
   const recState = recorder.recState;
-  const micDisabled = busy || recState === "stopped" || pendingUserTurn !== null;
+  const micDisabled = busy || recState === "stopped" || undoInFlight;
 
   const handleMicTap = () => {
     if (recState === "idle") {
@@ -865,19 +866,28 @@ export default function ConversationPage() {
 
   // Chronological chat log: each completed history turn contributes a
   // tutor bubble + the student's bubble, then the (not-yet-answered)
-  // currentTurn's tutor bubble, then — during the mis-send cancel grace
-  // window — the pending student bubble that hasn't been sent to /turn yet.
-  type ChatItem = { key: string; role: "tutor" | "student"; text: string; textEn: string | null };
+  // currentTurn's tutor bubble.
+  type ChatItem = {
+    key: string;
+    role: "tutor" | "student";
+    text: string;
+    textEn: string | null;
+    /** Fix 2: only the single most recent student bubble can be undone. */
+    undoable?: boolean;
+  };
   const chatItems: ChatItem[] = [];
   history.forEach((h, i) => {
     chatItems.push({ key: `t${i}`, role: "tutor", text: h.tutorText, textEn: h.tutorTextEn });
-    chatItems.push({ key: `s${i}`, role: "student", text: h.transcriptKana, textEn: h.transcriptEn });
+    chatItems.push({
+      key: `s${i}`,
+      role: "student",
+      text: h.transcriptKana,
+      textEn: h.transcriptEn,
+      undoable: i === history.length - 1,
+    });
   });
   if (currentTurn) {
     chatItems.push({ key: "t-current", role: "tutor", text: currentTurn.tutorText, textEn: currentTurn.tutorTextEn });
-  }
-  if (pendingUserTurn) {
-    chatItems.push({ key: "s-pending", role: "student", text: pendingUserTurn.transcriptKana, textEn: null });
   }
 
   return (
@@ -920,11 +930,14 @@ export default function ConversationPage() {
           <div style={{ fontSize: 12, fontWeight: "bold", color: "#a35a00", marginBottom: 4 }}>
             Today&apos;s missions
           </div>
-          {missions.map((m) => (
-            <div key={m.candoId} style={{ fontSize: 13, color: "#7a5a30" }}>
-              ☐ {m.en}
-            </div>
-          ))}
+          {missions.map((m) => {
+            const used = missionsUsedIds.has(m.candoId);
+            return (
+              <div key={m.candoId} style={{ fontSize: 13, color: used ? "#4caf50" : "#7a5a30" }}>
+                {used ? "☑" : "☐"} {m.en}
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -993,6 +1006,26 @@ export default function ConversationPage() {
                   {item.textEn}
                 </div>
               )}
+              {/* Fix 2: persistent (no time limit) undo control, only on the
+                  single most recent student bubble. */}
+              {item.undoable && (
+                <div style={{ textAlign: "right", marginTop: 4, marginRight: 4 }}>
+                  <button
+                    onClick={undoLastTurn}
+                    disabled={busy || pendingEnd || undoInFlight}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      color: "#aaa",
+                      fontSize: 11,
+                      cursor: busy || pendingEnd || undoInFlight ? "default" : "pointer",
+                      padding: 0,
+                    }}
+                  >
+                    {undoInFlight ? "Undoing..." : "↺ Not what I said"}
+                  </button>
+                </div>
+              )}
             </div>
           )
         )}
@@ -1057,25 +1090,6 @@ export default function ConversationPage() {
                 End conversation
               </button>
             </div>
-          </div>
-        ) : pendingUserTurn ? (
-          // Mis-send cancel grace (#4): no required tap — this just gives an
-          // escape hatch for the 2-3s before sendTurn() fires on its own.
-          <div style={{ textAlign: "center" }}>
-            <button
-              onClick={cancelPendingUserTurn}
-              style={{
-                padding: "10px 18px",
-                borderRadius: 20,
-                border: "1px solid #ccc",
-                background: "white",
-                color: "#555",
-                fontSize: 14,
-                cursor: "pointer",
-              }}
-            >
-              Not what I said ({(cancelGraceMsRemaining / 1000).toFixed(1)}s)
-            </button>
           </div>
         ) : busy ? (
           <div style={{ textAlign: "center" }}>

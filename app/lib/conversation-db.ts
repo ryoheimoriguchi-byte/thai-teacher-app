@@ -332,6 +332,45 @@ export async function updateTurnTranscript(
   if (error) throw error;
 }
 
+/**
+ * Fix 2 (2026-09-19, mis-send undo): deletes a turn row outright. Used to
+ * remove the tutor reply that was generated in response to the exchange
+ * being undone.
+ */
+export async function deleteConversationTurn(
+  supabase: SupabaseClient,
+  turnId: string
+): Promise<void> {
+  const { error } = await supabase.from("conversation_turns").delete().eq("id", turnId);
+  if (error) throw error;
+}
+
+/**
+ * Fix 2 (2026-09-19, mis-send undo): resets a turn back to "open" (as if
+ * the student had never replied to it yet) — the same shape a turn has
+ * right after insertConversationTurn, before updateTurnTranscript /
+ * updateTurnScoring ever ran on it.
+ */
+export async function resetTurnToOpen(
+  supabase: SupabaseClient,
+  turnId: string
+): Promise<void> {
+  const { error } = await supabase
+    .from("conversation_turns")
+    .update({
+      transcript: null,
+      recording_ms: null,
+      char_count: null,
+      scores: null,
+      phrases_used: [],
+      vocab_used: [],
+      bonus_words: [],
+    })
+    .eq("id", turnId);
+
+  if (error) throw error;
+}
+
 export async function updateTurnScoring(
   supabase: SupabaseClient,
   turnId: string,

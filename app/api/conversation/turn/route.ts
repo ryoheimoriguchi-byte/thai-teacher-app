@@ -27,6 +27,10 @@ type TurnReply = {
   // union で縛らず string として受ける。
   support_given?: string | null;
   response_quality?: string | null;
+  // Fix 1 (live mission checklist): provisional judgment of which of
+  // today's missions were used in the student's last turn. Final judgment
+  // still happens at session end (see judgeCandos) — this is display-only.
+  missions_used?: string[];
   should_end: boolean;
 };
 
@@ -172,6 +176,9 @@ export async function POST(req: NextRequest) {
       // デバッグパネル表示用（?debug=1）。UIの通常表示には使わない。
       supportGiven: nextTurn.support_given ?? null,
       responseQuality: nextTurn.response_quality ?? null,
+      // Live mission checklist (display-only, provisional — see judgeCandos
+      // for the authoritative end-of-session judgment).
+      missionsUsed: nextTurn.missions_used ?? [],
       shouldEnd: Boolean(nextTurn.should_end),
     });
   } catch (error: unknown) {

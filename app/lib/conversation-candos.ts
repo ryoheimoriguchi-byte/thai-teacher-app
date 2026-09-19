@@ -36,7 +36,11 @@ const STAGE_1_CANDOS: ConversationCando[] = [
     ja: 'あいさつをして、あいさつを返すことができる',
     example: 'こんにちは。さようなら。',
     phraseIds: ['shop-01', 'shop-11', 'shop-12', 'fam-01'],
-    scenarioIds: ['shopping', 'family'],
+    // school added (2026-09-19, issue B): without it, 'school' had only one
+    // mission-eligible Stage-1 cando (S1-basic-05), so selectMissionCandos
+    // could never present 2 missions for that scenario. Greeting/goodbye is
+    // generic enough to apply there too (e.g. greeting the teacher).
+    scenarioIds: ['shopping', 'family', 'school'],
   },
   {
     id: 'S1-basic-02',
@@ -68,7 +72,9 @@ const STAGE_1_CANDOS: ConversationCando[] = [
     ja: '自分の名前を言うことができる',
     example: 'わたしは みれい です。',
     phraseIds: ['P-03'],
-    scenarioIds: ['family'],
+    // school added (2026-09-19, issue B): same reasoning as S1-basic-01 —
+    // saying your name naturally comes up when talking to a teacher too.
+    scenarioIds: ['family', 'school'],
   },
   {
     id: 'S1-basic-05',
@@ -385,10 +391,19 @@ export function judgeCandos(params: {
   events: CandoJudgmentEvent[];
   missionCandoIds: string[];
   progressByCandoId: Map<string, CandoProgressState>;
+  /**
+   * 現在の会話 Stage。cando.stage がこれを超える can-do は、成功・失敗とも
+   * 一切判定しない（偶然の成功であっても加点しない）。理由: 加点だけ許すと、
+   * 現在の Stage を卒業する前に次の Stage が虫食いで埋まってしまい、
+   * 「Stage を順番に卒業する」という設計の意味が失われるため。
+   */
+  currentStage: number;
 }): CandoJudgmentResult[] {
   const results: CandoJudgmentResult[] = [];
 
   for (const cando of ALL_CANDOS) {
+    if (cando.stage > params.currentStage) continue;
+
     const prev = params.progressByCandoId.get(cando.id) ?? {
       consecutiveSuccess: 0,
       achieved: false,

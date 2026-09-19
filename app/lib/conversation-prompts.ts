@@ -188,10 +188,12 @@ ${SUPPORT_TRACKING_INSTRUCTIONS}
   "transcript_en": "直前の生徒の発話（会話の最後の user メッセージ）の英訳",
   "support_given": "none",
   "response_quality": "answered",
+  "missions_used": [],
   "should_end": false
 }
 
 should_end は、会話が自然に終わったと判断したときだけ true にしてください。
+missions_used は、今日のミッションが提示されていないターンでは常に空配列 [] にしてください。
 `.trim();
 
 /**
@@ -217,7 +219,7 @@ function candoActionLabel(ja: string): string {
 function buildMissionInstruction(missions: ConversationCando[]): string {
   if (missions.length === 0) return '';
   const lines = missions
-    .map((m, i) => `${i + 1}. ${candoActionLabel(m.ja)}（例: ${m.example}）`)
+    .map((m, i) => `${i + 1}. [${m.id}] ${candoActionLabel(m.ja)}（例: ${m.example}）`)
     .join('\n');
   return `
 ## きょうの ミッション
@@ -228,6 +230,13 @@ ${lines}
 機会を作るとは、生徒がその表現を使いたくなる質問や場面を出すことです。
 ただし「〜と言ってください」と直接指示してはいけません。
 生徒が使わなくても、責めたり催促したりしないでください。
+
+## missions_used（記録用・暫定判定）
+直前の生徒の発話で、上のミッションのいずれかの表現が実際に使われていたら、
+その [ ] 内の id を missions_used の配列に入れてください（複数可）。
+使われていなければ空配列 [] にしてください。判定に迷う場合は「使われていない」
+扱いにしてください。この判定は会話中の表示用の暫定値です。正式な判定は
+セッション終了時に別途まとめて行うので、ここでは大まかな判定で構いません。
 `.trim();
 }
 

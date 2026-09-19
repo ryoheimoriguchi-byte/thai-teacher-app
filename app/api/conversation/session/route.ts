@@ -21,7 +21,10 @@ import {
   finalizeSessionReview,
   fetchConversationTurns,
   insertConversationTurn,
+  updateSessionProgress,
   updateTurnScoring,
+  deleteConversationTurn,
+  resetTurnToOpen,
   fetchUserCandos,
   upsertUserCando,
   getOrCreateConversationStage,
@@ -93,8 +96,11 @@ export async function POST(req: NextRequest) {
     if (body.action === "abandon") {
       return await handleAbandon(body);
     }
+    if (body.action === "undo_last_turn") {
+      return await handleUndoLastTurn(body);
+    }
     return NextResponse.json(
-      { error: "action must be 'start', 'end', or 'abandon'" },
+      { error: "action must be 'start', 'end', 'abandon', or 'undo_last_turn'" },
       { status: 400 }
     );
   } catch (error: unknown) {
@@ -215,6 +221,63 @@ async function handleAbandon(body: Record<string, unknown>) {
   return NextResponse.json({ sessionId, status: "abandoned" });
 }
 
+/**
+ * Fix 2 (2026-09-19): "Not what I said" — a persistent, no-time-limit
+ * control next to the most recent student bubble (replacing the earlier
+ * timed pre-send cancel window, which was too easy to miss while
+ * scrolling). Undoes exactly the last exchange:
+ *   - deletes the tutor reply that was generated in response to it
+ *     (turns[last], which is the currently "open" turn awaiting a reply)
+ *   - resets the turn before it (turns[last-1]) back to "open", so
+ *     recording again just re-answers that same tutor line
+ *   - rolls back turn_count / speaking_ms on the session accordingly
+ * Deliberately only supports undoing the single most recent exchange, not
+ * arbitrary history — see the instructions this was built from.
+ */
+async function handleUndoLastTurn(body: Record<string, unknown>) {
+  const sessionId = body.sessionId as string;
+  if (!sessionId) {
+    return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
+  }
+
+  const supabase = getSupabaseClient();
+  const session = await getConversationSession(supabase, sessionId);
+  if (!session) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+  if (session.status !== "active") {
+    return NextResponse.json(
+      { error: `Session is not active (status: ${session.status})` },
+      { status: 409 }
+    );
+  }
+
+  const turns = await fetchConversationTurns(supabase, sessionId);
+  // turns[last] should be the currently open turn (transcript===null,
+  // awaiting the student's next reply) — the same invariant /turn relies
+  // on. turns[last-1] is the exchange we're undoing (it has the transcript
+  // we're discarding).
+  const lastTurn = turns[turns.length - 1];
+  const prevTurn = turns[turns.length - 2];
+  if (!lastTurn || lastTurn.transcript !== null || !prevTurn || prevTurn.transcript === null) {
+    return NextResponse.json({ error: "Nothing to undo" }, { status: 409 });
+  }
+
+  await deleteConversationTurn(supabase, lastTurn.id);
+  await resetTurnToOpen(supabase, prevTurn.id);
+  await updateSessionProgress(supabase, sessionId, {
+    turnCount: Math.max(0, session.turn_count - 1),
+    speakingMs: Math.max(0, session.speaking_ms - (prevTurn.recording_ms ?? 0)),
+  });
+
+  return NextResponse.json({
+    // The tutor line the student is back to answering — the client
+    // restores this as currentTurn and drops the last history entry.
+    tutorText: prevTurn.tutor_text,
+    tutorTextEn: prevTurn.tutor_text_en,
+  });
+}
+
 async function handleEnd(body: Record<string, unknown>) {
   const sessionId = body.sessionId as string;
   // Math.round defensively — actual_duration_sec is an `integer` DB column.
@@ -332,10 +395,19 @@ async function handleEnd(body: Record<string, unknown>) {
         ])
       );
 
+      // Fetched once here and reused below for the stage-up check — judgment
+      // itself is capped at this stage (see judgeCandos's currentStage doc).
+      const currentStage = await getOrCreateConversationStage(
+        supabase,
+        session.user_id,
+        session.language
+      );
+
       candoResults = judgeCandos({
         events,
         missionCandoIds: session.mission_cando_ids ?? [],
         progressByCandoId,
+        currentStage,
       });
 
       const now = new Date().toISOString();
@@ -363,11 +435,7 @@ async function handleEnd(body: Record<string, unknown>) {
       });
 
       // ---- Stage 解放判定（100%。語彙側の90%とは異なる） --------------
-      const currentStage = await getOrCreateConversationStage(
-        supabase,
-        session.user_id,
-        session.language
-      );
+      // currentStage is the same value fetched above, before judgeCandos.
       const stageCandos = ALL_CANDOS.filter((c) => c.stage === currentStage);
       if (stageCandos.length > 0) {
         const allAchieved = stageCandos.every((c) => {
