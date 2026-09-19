@@ -25,6 +25,16 @@ export interface UseRecorderOptions {
   /** How long the "keep talking" grace window stays open after an auto-stop. */
   graceWindowMs?: number;
   /**
+   * Safety net: force-stop the recording after this much time regardless of
+   * silence detection. Added after a real-device bug where background noise
+   * stayed above `silenceThreshold` indefinitely, so the speak→silence
+   * auto-stop never fired and the mic stayed in "recording" forever with no
+   * way out except a manual tap the child didn't know to make.
+   * Default: 30000 (30s) — generous for a single child's utterance, but
+   * bounded so "recording" can never mean "stuck forever".
+   */
+  maxRecordingMs?: number;
+  /**
    * Called once a recording is truly finalized (either an immediate manual
    * stop, or the grace window elapsing without a "continue" tap).
    * `totalMs` is the sum of active-recording time across all segments
@@ -58,7 +68,7 @@ function pickMimeType(): string {
 }
 
 export function useRecorder(options: UseRecorderOptions) {
-  const { onRecordingComplete, graceWindowMs = 3000 } = options;
+  const { onRecordingComplete, graceWindowMs = 3000, maxRecordingMs = 30000 } = options;
 
   const [silenceThreshold, setSilenceThreshold] = useState(options.silenceThreshold ?? 0.006);
   const [silenceDurationMs, setSilenceDurationMs] = useState(options.silenceDurationMs ?? 2500);
@@ -172,6 +182,18 @@ export function useRecorder(options: UseRecorderOptions) {
     const recordingElapsed = now - segmentStartAtRef.current;
     const silenceElapsed = now - lastSpeechAtRef.current;
 
+    // Safety net (see maxRecordingMs doc comment above): fires regardless of
+    // hasSpokenOnce/silenceThreshold, so this can never be defeated by
+    // background noise that never dips below threshold. No grace window —
+    // just stop and hand off whatever was captured (if it's silence/noise,
+    // the existing empty-transcript path already recovers gracefully).
+    if (recordingElapsed >= maxRecordingMs) {
+      addDebugLog(`force-stop: recordingElapsed=${recordingElapsed.toFixed(0)}ms >= maxRecordingMs=${maxRecordingMs}ms`);
+      stopMonitorLoop();
+      finalizeRecorder(false);
+      return;
+    }
+
     if (
       hasSpokenOnceRef.current &&
       recordingElapsed >= minRecordingMs &&
@@ -183,7 +205,7 @@ export function useRecorder(options: UseRecorderOptions) {
     }
 
     rafRef.current = requestAnimationFrame(() => monitorLoopRef.current());
-  }, [silenceThreshold, silenceDurationMs, minRecordingMs, finalizeRecorder]);
+  }, [silenceThreshold, silenceDurationMs, minRecordingMs, maxRecordingMs, finalizeRecorder, addDebugLog]);
 
   useEffect(() => {
     monitorLoopRef.current = monitorLoop;

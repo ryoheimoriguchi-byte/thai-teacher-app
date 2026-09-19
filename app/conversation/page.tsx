@@ -22,6 +22,7 @@ import { SCENARIOS, ConversationScenario } from "../lib/conversation-scenarios";
 import { FALLBACK_CLOSING_LINE } from "../lib/conversation-prompts";
 import { useRecorder } from "../lib/use-recorder";
 import { useAudioPlayer } from "../lib/use-audio-player";
+import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -59,6 +60,21 @@ const CLOSING_THRESHOLD_SEC = 90;
 // reply, or the fixed fallback closing line) before auto-advancing to the
 // result screen, if the user hasn't tapped "Continue" by then.
 const PENDING_END_AUTO_ADVANCE_MS = 10000;
+
+// Real-device bug: a plain fetch() with no timeout can hang forever if the
+// network stalls, leaving the UI stuck on "Listening..." with no way out.
+// Every conversation API call is bounded so a stuck call always eventually
+// becomes a catchable error (which the UI recovers from via "Try again" /
+// "End conversation"). session end gets a longer budget — it includes the
+// end-of-session review call (max_tokens 4000, slower than a single turn).
+const SESSION_START_TIMEOUT_MS = 20000;
+const SESSION_END_TIMEOUT_MS = 35000;
+const TRANSCRIBE_TIMEOUT_MS = 20000;
+const TURN_TIMEOUT_MS = 20000;
+
+// Mis-send cancel grace (#4): how long "Not what I said" stays visible
+// after a transcript comes back, before automatically sending it.
+const CANCEL_GRACE_MS = 2500;
 
 export default function ConversationPage() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
@@ -100,20 +116,39 @@ export default function ConversationPage() {
 
   const [currentTurn, setCurrentTurn] = useState<CurrentTurn | null>(null);
   const [history, setHistory] = useState<HistoryTurn[]>([]);
-  const [showTranslation, setShowTranslation] = useState(false);
-  // Kana-only (display) version of the last transcript, shown in "You
-  // said". The kanji version is only ever used internally (sent to /turn,
-  // stored in the DB) — never shown, since Mirei can't read kanji yet.
-  // Stays visible (not cleared) until the next recording starts, so the
-  // child has time to read it alongside the tutor's next reply.
-  const [lastTranscriptKana, setLastTranscriptKana] = useState<string | null>(null);
-  const [lastTranscriptEn, setLastTranscriptEn] = useState<string | null>(null);
+  // Chat-format screen (#5): which tutor bubbles have "Show English"
+  // expanded, keyed by the same `key` used in chatItems below. A Set (not a
+  // single bool) because every tutor bubble gets its own toggle now, not
+  // just the latest one.
+  const [expandedTranslations, setExpandedTranslations] = useState<Set<string>>(new Set());
   const [retryNotice, setRetryNotice] = useState<string | null>(null);
-  const [historyOpen, setHistoryOpen] = useState(false);
   // Set only when a turn failed AFTER we already have a transcript (i.e. the
   // /turn call itself failed, not /transcribe). Distinct from errorMessage
   // so we can show explicit recovery actions instead of a bare error line.
   const [turnError, setTurnError] = useState<string | null>(null);
+  // Mis-send cancel grace (#4): the just-transcribed line, shown as a chat
+  // bubble with a "Not what I said" escape hatch, BEFORE /turn is ever
+  // called — nothing about this turn is persisted server-side yet at this
+  // point, so canceling here is always clean. If not canceled within
+  // CANCEL_GRACE_MS, sendTurn() fires automatically (no required tap).
+  const [pendingUserTurn, setPendingUserTurn] = useState<{
+    transcript: string;
+    transcriptKana: string;
+    totalMs: number;
+  } | null>(null);
+  const [cancelGraceMsRemaining, setCancelGraceMsRemaining] = useState(0);
+  const cancelGraceTimeoutRef = useRef<number | null>(null);
+  const cancelGraceIntervalRef = useRef<number | null>(null);
+  const clearCancelGraceTimers = useCallback(() => {
+    if (cancelGraceTimeoutRef.current) {
+      window.clearTimeout(cancelGraceTimeoutRef.current);
+      cancelGraceTimeoutRef.current = null;
+    }
+    if (cancelGraceIntervalRef.current) {
+      window.clearInterval(cancelGraceIntervalRef.current);
+      cancelGraceIntervalRef.current = null;
+    }
+  }, []);
 
   // ?debug=1 panel: elapsed time / isClosing bookkeeping, so this can be
   // verified on a real device without guessing.
@@ -168,6 +203,16 @@ export default function ConversationPage() {
 
   const audioPlayer = useAudioPlayer();
 
+  // Chat-style layout (#5): auto-scroll to the newest message whenever the
+  // chat log grows (a new tutor reply, a new student line, or the pending
+  // cancel-grace bubble appearing/disappearing).
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (phase !== "conversation") return;
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [phase, history.length, currentTurn, pendingUserTurn]);
+
   // Step C3: session creation (and mission selection, which happens
   // server-side as part of "start") now runs when moving from [1] to [2],
   // not when pressing "Start" on [2] — the missions need to already be
@@ -180,26 +225,29 @@ export default function ConversationPage() {
     setBusyMessage("Getting ready...");
     setErrorMessage(null);
     try {
-      const res = await fetch("/api/conversation/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "start",
-          userId: currentUser.id,
-          language: currentUser.language,
-          scenarioId: selectedScenario.id,
-          plannedDurationSec: selectedDurationMin * 60,
-        }),
-      });
+      const res = await fetchWithTimeout(
+        "/api/conversation/session",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "start",
+            userId: currentUser.id,
+            language: currentUser.language,
+            scenarioId: selectedScenario.id,
+            plannedDurationSec: selectedDurationMin * 60,
+          }),
+        },
+        SESSION_START_TIMEOUT_MS
+      );
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to start session");
 
       setSessionId(data.sessionId);
       setCurrentTurn({ tutorText: data.tutorText, tutorTextEn: data.tutorTextEn });
       setHistory([]);
-      setShowTranslation(false);
-      setLastTranscriptKana(null);
-      setLastTranscriptEn(null);
+      setExpandedTranslations(new Set());
+      setPendingUserTurn(null);
       setRetryNotice(null);
       setPlannedDurationSec(selectedDurationMin * 60);
       setMissions((data.missions as { candoId: string; en: string; example: string }[]) ?? []);
@@ -259,11 +307,15 @@ export default function ConversationPage() {
     setBusyMessage("Wrapping up...");
     try {
       const actualDurationSec = Math.round((Date.now() - sessionStartedAtRef.current) / 1000);
-      const res = await fetch("/api/conversation/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "end", sessionId, actualDurationSec }),
-      });
+      const res = await fetchWithTimeout(
+        "/api/conversation/session",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "end", sessionId, actualDurationSec }),
+        },
+        SESSION_END_TIMEOUT_MS
+      );
       const data = await res.json();
       setResult(data);
       if (debugEnabled) fetchCandoDebug();
@@ -305,7 +357,9 @@ export default function ConversationPage() {
   useEffect(() => {
     return () => {
       if (pendingEndTimeoutRef.current) window.clearTimeout(pendingEndTimeoutRef.current);
+      clearCancelGraceTimers();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Live ticking clock for the debug panel + the force-end safety net below.
@@ -355,6 +409,101 @@ export default function ConversationPage() {
     }, []),
   });
 
+  // The actual /turn call, extracted so it can be invoked either
+  // immediately or after the mis-send cancel grace window (#4) elapses.
+  const sendTurn = useCallback(
+    async (transcript: string, transcriptKana: string, totalMs: number) => {
+      if (!sessionId || !currentTurn) return;
+      setPendingUserTurn(null);
+      setBusy(true);
+      setBusyMessage("The teacher is thinking...");
+
+      const elapsedSec = (Date.now() - sessionStartedAtRef.current) / 1000;
+      const isClosing = plannedDurationSec - elapsedSec <= CLOSING_THRESHOLD_SEC;
+      addTimingLog(
+        `turn: elapsed=${elapsedSec.toFixed(0)}s / planned=${plannedDurationSec}s / isClosing=${isClosing}`
+      );
+
+      try {
+        const turnRes = await fetchWithTimeout(
+          "/api/conversation/turn",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId,
+              transcript,
+              // Math.round defensively, even though use-recorder.ts already
+              // rounds — recording_ms/speaking_ms are `integer` DB columns and
+              // a stray float here breaks the DB write.
+              recordingMs: Math.round(totalMs),
+              isClosing,
+            }),
+          },
+          TURN_TIMEOUT_MS
+        );
+        const turnData = await turnRes.json();
+        if (!turnRes.ok) throw new Error(turnData.error || "Turn failed");
+
+        setHistory((prev) => [
+          ...prev,
+          {
+            tutorText: currentTurn.tutorText,
+            tutorTextEn: currentTurn.tutorTextEn,
+            transcript,
+            transcriptKana,
+            transcriptEn: (turnData.transcriptEn as string | null) ?? null,
+          },
+        ]);
+        setCurrentTurn({ tutorText: turnData.tutorText, tutorTextEn: turnData.tutorTextEn });
+        addTimingLog(
+          `turn ${turnData.turnIndex}: support_given=${turnData.supportGiven ?? "null"} response_quality=${turnData.responseQuality ?? "null"}`
+        );
+        recorder.reset();
+        setBusy(false);
+
+        const elapsedAfterSec = (Date.now() - sessionStartedAtRef.current) / 1000;
+        if (turnData.shouldEnd) {
+          // Claude ended it naturally — its own reply (already set as
+          // currentTurn above) IS the closing line. Let the user listen to
+          // it / read it before moving on, rather than jumping straight to
+          // the result screen.
+          addTimingLog(`shouldEnd:true received at elapsed=${elapsedAfterSec.toFixed(0)}s -> pending end`);
+          enterPendingEnd();
+        } else if (elapsedAfterSec > plannedDurationSec + FORCE_END_OVERRUN_SEC) {
+          // Overrun despite Claude not ending it — override the display with
+          // the fixed closing line instead of Claude's (non-closing) reply.
+          addTimingLog(
+            `force-end: elapsed=${elapsedAfterSec.toFixed(0)}s > planned(${plannedDurationSec}s)+${FORCE_END_OVERRUN_SEC}s (shouldEnd never received)`
+          );
+          enterPendingEnd({ tutorText: FALLBACK_CLOSING_LINE.ja, tutorTextEn: FALLBACK_CLOSING_LINE.en });
+        }
+      } catch (e) {
+        // The transcript IS already known to us here, but per the server fix
+        // it was NOT yet written to the DB (the write is deferred until
+        // Claude succeeds) — so the "open turn" for this session is still
+        // valid, and a plain retry (record again) will work correctly.
+        // We still show explicit recovery actions since it's not obvious
+        // to a child what to do next when this happens.
+        addTimingLog(`turn failed: ${e instanceof Error ? e.message : String(e)}`);
+        setBusy(false);
+        setTurnError(e instanceof Error ? e.message : String(e));
+        recorder.reset();
+      }
+    },
+    [sessionId, currentTurn, plannedDurationSec, enterPendingEnd, addTimingLog, recorder]
+  );
+
+  // Cancels the mis-send grace window (#4): discards the just-transcribed
+  // line (never sent to /turn, so nothing was persisted) and gets the mic
+  // ready for a new recording.
+  const cancelPendingUserTurn = useCallback(() => {
+    clearCancelGraceTimers();
+    setPendingUserTurn(null);
+    setCancelGraceMsRemaining(0);
+    recorder.reset();
+  }, [clearCancelGraceTimers, recorder]);
+
   const handleRecordingComplete = useCallback(
     async (blob: Blob, mimeType: string, totalMs: number) => {
       if (!sessionId || !currentTurn) return;
@@ -387,10 +536,11 @@ export default function ConversationPage() {
         formData.append("audio", blob, `recording.${ext}`);
         formData.append("sessionId", sessionId);
 
-        const transcribeRes = await fetch("/api/conversation/transcribe", {
-          method: "POST",
-          body: formData,
-        });
+        const transcribeRes = await fetchWithTimeout(
+          "/api/conversation/transcribe",
+          { method: "POST", body: formData },
+          TRANSCRIBE_TIMEOUT_MS
+        );
         const transcribeData = await transcribeRes.json();
         if (!transcribeRes.ok) throw new Error(transcribeData.error || "Transcription failed");
 
@@ -402,8 +552,12 @@ export default function ConversationPage() {
       } catch (e) {
         // Nothing was persisted server-side for this attempt (transcribe
         // doesn't write to the DB) — a plain retry via the mic button is safe.
+        // Uses the same turnError recovery UI (Try again / End conversation)
+        // as a /turn failure — a timeout/network error here needs the exact
+        // same explicit escape hatch, not a bare error line.
+        addTimingLog(`transcribe failed: ${e instanceof Error ? e.message : String(e)}`);
         setBusy(false);
-        setErrorMessage(e instanceof Error ? e.message : String(e));
+        setTurnError(e instanceof Error ? e.message : String(e));
         recorder.reset();
         return;
       }
@@ -418,86 +572,25 @@ export default function ConversationPage() {
         return;
       }
 
-      setLastTranscriptKana(transcriptKana);
-      setBusyMessage("The teacher is thinking...");
-
-      const elapsedSec = (Date.now() - sessionStartedAtRef.current) / 1000;
-      const isClosing = plannedDurationSec - elapsedSec <= CLOSING_THRESHOLD_SEC;
-      addTimingLog(
-        `turn: elapsed=${elapsedSec.toFixed(0)}s / planned=${plannedDurationSec}s / isClosing=${isClosing}`
-      );
-
-      try {
-        const turnRes = await fetch("/api/conversation/turn", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId,
-            transcript,
-            // Math.round defensively, even though use-recorder.ts already
-            // rounds — recording_ms/speaking_ms are `integer` DB columns and
-            // a stray float here breaks the DB write.
-            recordingMs: Math.round(totalMs),
-            isClosing,
-          }),
-        });
-        const turnData = await turnRes.json();
-        if (!turnRes.ok) throw new Error(turnData.error || "Turn failed");
-
-        setHistory((prev) => [
-          ...prev,
-          {
-            tutorText: currentTurn.tutorText,
-            tutorTextEn: currentTurn.tutorTextEn,
-            transcript,
-            transcriptKana,
-            transcriptEn: (turnData.transcriptEn as string | null) ?? null,
-          },
-        ]);
-        setCurrentTurn({ tutorText: turnData.tutorText, tutorTextEn: turnData.tutorTextEn });
-        addTimingLog(
-          `turn ${turnData.turnIndex}: support_given=${turnData.supportGiven ?? "null"} response_quality=${turnData.responseQuality ?? "null"}`
-        );
-        // Deliberately NOT clearing lastTranscriptKana/lastTranscriptEn here —
-        // "You said" stays visible (with its English translation, now
-        // available) until the next recording starts, so the child can read
-        // it alongside the tutor's new reply rather than having it vanish
-        // the instant a response arrives.
-        setLastTranscriptEn((turnData.transcriptEn as string | null) ?? null);
-        setShowTranslation(false);
-        recorder.reset();
-        setBusy(false);
-
-        const elapsedAfterSec = (Date.now() - sessionStartedAtRef.current) / 1000;
-        if (turnData.shouldEnd) {
-          // Claude ended it naturally — its own reply (already set as
-          // currentTurn above) IS the closing line. Let the user listen to
-          // it / read it before moving on, rather than jumping straight to
-          // the result screen.
-          addTimingLog(`shouldEnd:true received at elapsed=${elapsedAfterSec.toFixed(0)}s -> pending end`);
-          enterPendingEnd();
-        } else if (elapsedAfterSec > plannedDurationSec + FORCE_END_OVERRUN_SEC) {
-          // Overrun despite Claude not ending it — override the display with
-          // the fixed closing line instead of Claude's (non-closing) reply.
-          addTimingLog(
-            `force-end: elapsed=${elapsedAfterSec.toFixed(0)}s > planned(${plannedDurationSec}s)+${FORCE_END_OVERRUN_SEC}s (shouldEnd never received)`
-          );
-          enterPendingEnd({ tutorText: FALLBACK_CLOSING_LINE.ja, tutorTextEn: FALLBACK_CLOSING_LINE.en });
-        }
-      } catch (e) {
-        // The transcript IS already known to us here, but per the server fix
-        // it was NOT yet written to the DB (the write is deferred until
-        // Claude succeeds) — so the "open turn" for this session is still
-        // valid, and a plain retry (record again) will work correctly.
-        // We still show explicit recovery actions since it's not obvious
-        // to a child what to do next when this happens.
-        setBusy(false);
-        setTurnError(e instanceof Error ? e.message : String(e));
-        recorder.reset();
-      }
+      // Mis-send cancel grace (#4): show the transcript as a pending chat
+      // bubble with a "Not what I said" escape hatch, before calling /turn
+      // at all. No required tap — if the window elapses without a cancel,
+      // sendTurn() fires on its own so the conversation tempo isn't
+      // interrupted for the (common) case where the transcript is correct.
+      setBusy(false);
+      setPendingUserTurn({ transcript, transcriptKana, totalMs });
+      setCancelGraceMsRemaining(CANCEL_GRACE_MS);
+      clearCancelGraceTimers();
+      const graceStartedAt = Date.now();
+      cancelGraceIntervalRef.current = window.setInterval(() => {
+        setCancelGraceMsRemaining(Math.max(0, CANCEL_GRACE_MS - (Date.now() - graceStartedAt)));
+      }, 100);
+      cancelGraceTimeoutRef.current = window.setTimeout(() => {
+        clearCancelGraceTimers();
+        sendTurn(transcript, transcriptKana, totalMs);
+      }, CANCEL_GRACE_MS);
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sessionId, currentTurn, plannedDurationSec, endSession, enterPendingEnd, addTimingLog]
+    [sessionId, currentTurn, plannedDurationSec, recorder, enterPendingEnd, addTimingLog, clearCancelGraceTimers, sendTurn]
   );
 
   useEffect(() => {
@@ -627,6 +720,9 @@ export default function ConversationPage() {
             }}
           >
             {selectedScenario.intro}
+            <div style={{ fontSize: 13, color: "#999", marginTop: 8, lineHeight: 1.5 }}>
+              {selectedScenario.introEn}
+            </div>
           </div>
 
           {missions.length > 0 && (
@@ -746,22 +842,49 @@ export default function ConversationPage() {
     );
   }
 
-  /* ---------------- [3] conversation ---------------- */
+  /* ---------------- [3] conversation (chat-style, #5) ---------------- */
   const recState = recorder.recState;
-  const micDisabled = busy || recState === "stopped";
+  const micDisabled = busy || recState === "stopped" || pendingUserTurn !== null;
 
   const handleMicTap = () => {
     if (recState === "idle") {
-      setLastTranscriptKana(null);
-      setLastTranscriptEn(null);
       recorder.startRecording();
     } else if (recState === "recording") {
       recorder.stopManually();
     }
   };
 
+  const toggleTranslation = (key: string) => {
+    setExpandedTranslations((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  // Chronological chat log: each completed history turn contributes a
+  // tutor bubble + the student's bubble, then the (not-yet-answered)
+  // currentTurn's tutor bubble, then — during the mis-send cancel grace
+  // window — the pending student bubble that hasn't been sent to /turn yet.
+  type ChatItem = { key: string; role: "tutor" | "student"; text: string; textEn: string | null };
+  const chatItems: ChatItem[] = [];
+  history.forEach((h, i) => {
+    chatItems.push({ key: `t${i}`, role: "tutor", text: h.tutorText, textEn: h.tutorTextEn });
+    chatItems.push({ key: `s${i}`, role: "student", text: h.transcriptKana, textEn: h.transcriptEn });
+  });
+  if (currentTurn) {
+    chatItems.push({ key: "t-current", role: "tutor", text: currentTurn.tutorText, textEn: currentTurn.tutorTextEn });
+  }
+  if (pendingUserTurn) {
+    chatItems.push({ key: "s-pending", role: "student", text: pendingUserTurn.transcriptKana, textEn: null });
+  }
+
   return (
-    <main style={containerStyle}>
+    // height (not just minHeight) + overflow: hidden so the chat log
+    // (flex: 1, overflowY: auto below) is the thing that scrolls, not the
+    // whole page — that's what keeps the mic button fixed at the bottom.
+    <main style={{ ...containerStyle, height: "100dvh", overflow: "hidden" }}>
       {/* Header */}
       <div
         style={{
@@ -770,6 +893,7 @@ export default function ConversationPage() {
           padding: "12px 16px",
           borderBottom: "1px solid #eee",
           background: "white",
+          flexShrink: 0,
         }}
       >
         <button
@@ -780,113 +904,126 @@ export default function ConversationPage() {
         </button>
       </div>
 
-      {/* Body */}
-      <div style={{ flex: 1, padding: 20, display: "flex", flexDirection: "column", alignItems: "center" }}>
-        <div style={{ fontSize: 56, marginBottom: 8 }}>👩‍🏫</div>
+      {/* Mission checklist (#6): display-only, no real-time checking — the
+          judgment that decides achievement only runs at session end (see
+          conversation-candos.ts), so a check ticked mid-conversation could
+          be wrong by the time the session actually ends. */}
+      {missions.length > 0 && (
+        <div
+          style={{
+            background: "#fff3e6",
+            borderBottom: "1px solid #ffe0b3",
+            padding: "10px 16px",
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ fontSize: 12, fontWeight: "bold", color: "#a35a00", marginBottom: 4 }}>
+            Today&apos;s missions
+          </div>
+          {missions.map((m) => (
+            <div key={m.candoId} style={{ fontSize: 13, color: "#7a5a30" }}>
+              ☐ {m.en}
+            </div>
+          ))}
+        </div>
+      )}
 
-        {currentTurn && (
-          <div
-            style={{
-              width: "100%",
-              background: "white",
-              borderRadius: 16,
-              padding: 20,
-              marginBottom: 20,
-              boxSizing: "border-box",
-            }}
-          >
-            <div style={{ fontSize: 24, lineHeight: 1.6, marginBottom: 12 }}>{currentTurn.tutorText}</div>
+      {/* Chat log — new messages appended at the bottom, auto-scrolls down. */}
+      <div
+        ref={chatScrollRef}
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "16px 16px 8px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 14,
+        }}
+      >
+        {chatItems.map((item) =>
+          item.role === "tutor" ? (
+            <div key={item.key} style={{ alignSelf: "flex-start", maxWidth: "88%" }}>
+              <div
+                style={{
+                  background: "white",
+                  borderRadius: "16px 16px 16px 4px",
+                  padding: "12px 16px",
+                  fontSize: 19,
+                  lineHeight: 1.5,
+                  boxShadow: "0 1px 2px rgba(0,0,0,0.06)",
+                  boxSizing: "border-box",
+                }}
+              >
+                {item.text}
+              </div>
+              <div style={{ display: "flex", gap: 12, marginTop: 4, marginLeft: 4 }}>
+                <button
+                  onClick={() => audioPlayer.play(item.text)}
+                  style={{ background: "none", border: "none", color: "#888", fontSize: 12, cursor: "pointer", padding: 0 }}
+                >
+                  🔊 {audioPlayer.state === "loading" ? "..." : "Listen"}
+                </button>
+                <button
+                  onClick={() => toggleTranslation(item.key)}
+                  style={{ background: "none", border: "none", color: "#888", fontSize: 12, cursor: "pointer", padding: 0 }}
+                >
+                  {expandedTranslations.has(item.key) ? "Hide English" : "Show English"}
+                </button>
+              </div>
+              {expandedTranslations.has(item.key) && (
+                <div style={{ fontSize: 12, color: "#999", marginTop: 4, marginLeft: 4 }}>{item.textEn}</div>
+              )}
+            </div>
+          ) : (
+            <div key={item.key} style={{ alignSelf: "flex-end", maxWidth: "88%" }}>
+              <div
+                style={{
+                  background: "#c8e9c8",
+                  borderRadius: "16px 16px 4px 16px",
+                  padding: "12px 16px",
+                  fontSize: 17,
+                  lineHeight: 1.5,
+                  boxSizing: "border-box",
+                }}
+              >
+                {item.text}
+              </div>
+              {item.textEn && (
+                <div style={{ fontSize: 12, color: "#8a9a8a", marginTop: 4, marginRight: 4, textAlign: "right" }}>
+                  {item.textEn}
+                </div>
+              )}
+            </div>
+          )
+        )}
+        <div ref={chatEndRef} />
+      </div>
 
+      {/* Fixed footer: mic button / status / recovery actions. */}
+      <div style={{ borderTop: "1px solid #eee", background: "white", padding: "16px 20px", flexShrink: 0 }}>
+        {pendingEnd ? (
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 13, color: "#888", marginBottom: 12 }}>
+              Listen to the teacher, then continue when you&apos;re ready.
+            </div>
             <button
-              onClick={() => audioPlayer.play(currentTurn.tutorText)}
+              onClick={handleContinueToResult}
               style={{
-                background: "none",
-                border: "1px solid #ddd",
-                borderRadius: 20,
-                padding: "6px 14px",
-                fontSize: 15,
-                cursor: "pointer",
-                marginRight: 8,
-              }}
-            >
-              🔊 {audioPlayer.state === "loading" ? "..." : audioPlayer.state === "playing" ? "Playing" : "Listen"}
-            </button>
-
-            <button
-              onClick={() => setShowTranslation((v) => !v)}
-              style={{
-                background: "none",
+                padding: "14px 28px",
+                borderRadius: 24,
                 border: "none",
-                color: "#888",
-                fontSize: 14,
+                background: "#ff8c42",
+                color: "white",
+                fontSize: 16,
                 cursor: "pointer",
               }}
             >
-              {showTranslation ? "Hide English" : "Show English"}
+              Continue
             </button>
-
-            {showTranslation && (
-              <div style={{ marginTop: 8, fontSize: 14, color: "#666" }}>{currentTurn.tutorTextEn}</div>
-            )}
           </div>
-        )}
-
-        {lastTranscriptKana && (
-          <div
-            style={{
-              width: "100%",
-              background: "#eef7ee",
-              borderRadius: 12,
-              padding: 14,
-              marginBottom: 16,
-              fontSize: 16,
-              boxSizing: "border-box",
-            }}
-          >
-            <div>You said: 「{lastTranscriptKana}」</div>
-            {lastTranscriptEn && (
-              <div style={{ marginTop: 4, fontSize: 13, color: "#8a9a8a" }}>{lastTranscriptEn}</div>
-            )}
-          </div>
-        )}
-
-        {retryNotice && (
-          <div
-            style={{
-              width: "100%",
-              background: "#fff3e6",
-              borderRadius: 12,
-              padding: 14,
-              marginBottom: 16,
-              fontSize: 18,
-              textAlign: "center",
-              boxSizing: "border-box",
-            }}
-          >
-            {retryNotice}
-          </div>
-        )}
-
-        {errorMessage && !turnError && (
-          <div style={{ color: "#c00", marginBottom: 16, fontSize: 14, textAlign: "center" }}>
-            ⚠️ {errorMessage}
-          </div>
-        )}
-
-        {turnError && (
-          <div
-            style={{
-              width: "100%",
-              background: "#fdecea",
-              border: "1px solid #f5c6cb",
-              borderRadius: 12,
-              padding: 16,
-              marginBottom: 16,
-              textAlign: "center",
-              boxSizing: "border-box",
-            }}
-          >
-            <div style={{ color: "#611a15", fontSize: 14, marginBottom: 12 }}>⚠️ {turnError}</div>
+        ) : turnError ? (
+          <div style={{ textAlign: "center" }}>
+            <div style={{ color: "#c00", fontSize: 14, marginBottom: 12 }}>⚠️ {turnError}</div>
             <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
               <button
                 onClick={() => setTurnError(null)}
@@ -921,46 +1058,49 @@ export default function ConversationPage() {
               </button>
             </div>
           </div>
-        )}
-
-        {pendingEnd ? (
-          <div style={{ textAlign: "center", marginTop: 12 }}>
-            <div style={{ fontSize: 13, color: "#888", marginBottom: 12 }}>
-              Listen to the teacher, then continue when you&apos;re ready.
-            </div>
+        ) : pendingUserTurn ? (
+          // Mis-send cancel grace (#4): no required tap — this just gives an
+          // escape hatch for the 2-3s before sendTurn() fires on its own.
+          <div style={{ textAlign: "center" }}>
             <button
-              onClick={handleContinueToResult}
+              onClick={cancelPendingUserTurn}
               style={{
-                padding: "14px 28px",
-                borderRadius: 24,
-                border: "none",
-                background: "#ff8c42",
-                color: "white",
-                fontSize: 16,
+                padding: "10px 18px",
+                borderRadius: 20,
+                border: "1px solid #ccc",
+                background: "white",
+                color: "#555",
+                fontSize: 14,
                 cursor: "pointer",
               }}
             >
-              Continue
+              Not what I said ({(cancelGraceMsRemaining / 1000).toFixed(1)}s)
             </button>
           </div>
         ) : busy ? (
-          <div style={{ textAlign: "center", padding: 20 }}>
-            <div style={{ fontSize: 32, marginBottom: 8 }}>💭</div>
-            <div style={{ fontSize: 16, color: "#666" }}>{busyMessage}</div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 28, marginBottom: 4 }}>💭</div>
+            <div style={{ fontSize: 15, color: "#666" }}>{busyMessage}</div>
           </div>
         ) : (
-          <div style={{ textAlign: "center", marginTop: 12 }}>
+          <div style={{ textAlign: "center" }}>
+            {errorMessage && (
+              <div style={{ color: "#c00", marginBottom: 10, fontSize: 14 }}>⚠️ {errorMessage}</div>
+            )}
+            {retryNotice && (
+              <div style={{ color: "#a35a00", marginBottom: 10, fontSize: 15 }}>{retryNotice}</div>
+            )}
             <button
               onClick={handleMicTap}
               disabled={micDisabled}
               style={{
-                width: 100,
-                height: 100,
+                width: 84,
+                height: 84,
                 borderRadius: "50%",
                 border: "none",
                 background: recState === "recording" ? "#e53935" : "#4caf50",
                 color: "white",
-                fontSize: 36,
+                fontSize: 32,
                 cursor: micDisabled ? "default" : "pointer",
               }}
             >
@@ -989,45 +1129,9 @@ export default function ConversationPage() {
             )}
 
             {recorder.recordingError && (
-              <div style={{ marginTop: 12, fontSize: 13, color: "#c00", maxWidth: 320 }}>
+              <div style={{ marginTop: 12, fontSize: 13, color: "#c00", maxWidth: 320, marginLeft: "auto", marginRight: "auto" }}>
                 {recorder.recordingError}
               </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* History (collapsed) */}
-      <div style={{ background: "white", borderTop: "1px solid #eee" }}>
-        <button
-          onClick={() => setHistoryOpen((v) => !v)}
-          style={{
-            width: "100%",
-            textAlign: "left",
-            padding: "12px 16px",
-            background: "none",
-            border: "none",
-            fontSize: 14,
-            color: "#888",
-            cursor: "pointer",
-          }}
-        >
-          Conversation history {historyOpen ? "▲" : "▼"}
-        </button>
-        {historyOpen && (
-          <div style={{ padding: "0 16px 16px", maxHeight: 240, overflowY: "auto" }}>
-            {history.length === 0 ? (
-              <div style={{ fontSize: 13, color: "#aaa" }}>(none yet)</div>
-            ) : (
-              history.map((h, i) => (
-                <div key={i} style={{ marginBottom: 12, fontSize: 14 }}>
-                  <div style={{ color: "#555" }}>👩‍🏫 {h.tutorText}</div>
-                  <div style={{ color: "#333", marginTop: 2 }}>🧒 {h.transcriptKana}</div>
-                  {h.transcriptEn && (
-                    <div style={{ color: "#999", marginTop: 2, fontSize: 12 }}>({h.transcriptEn})</div>
-                  )}
-                </div>
-              ))
             )}
           </div>
         )}

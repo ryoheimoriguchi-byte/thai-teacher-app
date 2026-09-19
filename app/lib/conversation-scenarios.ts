@@ -32,6 +32,8 @@ export interface ConversationScenario {
   titleEn: string;
   /** 開始前に表示する場面説明（ひらがな） */
   intro: string;
+  /** intro の英訳。場面説明画面 [2] で intro の下に小さく添える。 */
+  introEn: string;
   /** 先生が演じる役 */
   tutorRole: string;
   /** クリア閾値（フレーズ数に対する割合）。累積判定 */
@@ -403,6 +405,7 @@ export const SCENARIOS: ConversationScenario[] = [
     title: 'おみせで かいもの',
     titleEn: 'Shopping at a store',
     intro: 'おみせに きました。てんいんさんと はなしてみよう。',
+    introEn: "You're at a shop. Let's talk with the shop staff.",
     tutorRole: 'おみせの てんいんさん',
     clearThreshold: 0.7,
     phrases: SHOPPING_PHRASES,
@@ -413,6 +416,7 @@ export const SCENARIOS: ConversationScenario[] = [
     title: 'かぞくの しょうかい',
     titleEn: 'Introducing your family',
     intro: 'あたらしい ともだちに かぞくの ことを おしえてあげよう。',
+    introEn: "Tell your new friend about your family.",
     tutorRole: 'あたらしい ともだち',
     clearThreshold: 0.7,
     phrases: FAMILY_PHRASES,
@@ -423,6 +427,7 @@ export const SCENARIOS: ConversationScenario[] = [
     title: 'がっこうの はなし',
     titleEn: 'Talking about school',
     intro: 'きょう がっこうで あったことを はなそう。',
+    introEn: "Let's talk about what happened at school today.",
     tutorRole: 'にほんごの せんせい',
     clearThreshold: 0.7,
     phrases: SCHOOL_PHRASES,
@@ -441,6 +446,7 @@ export const SCENARIOS: ConversationScenario[] = [
     title: 'たべものの はなし',
     titleEn: 'Talking about food',
     intro: 'すきな たべものの はなしを しよう。',
+    introEn: "Let's talk about the foods you like.",
     tutorRole: 'にほんごの せんせい',
     clearThreshold: 0.7,
     phrases: FOOD_PHRASES,
@@ -451,6 +457,7 @@ export const SCENARIOS: ConversationScenario[] = [
     title: 'なんでも おしゃべり',
     titleEn: 'Free talk',
     intro: 'すきなことを なんでも はなそう。',
+    introEn: "Let's talk about anything you like.",
     tutorRole: 'にほんごの せんせい',
     clearThreshold: 0,
     phrases: [],
