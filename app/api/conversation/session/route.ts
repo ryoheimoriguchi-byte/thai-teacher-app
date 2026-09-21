@@ -19,6 +19,7 @@ import {
   completeConversationSession,
   abandonConversationSession,
   finalizeSessionReview,
+  fetchPreviousCompletedSession,
   fetchConversationTurns,
   insertConversationTurn,
   updateSessionProgress,
@@ -30,6 +31,7 @@ import {
   getOrCreateConversationStage,
   setConversationStage,
   type ConversationScores,
+  type ConversationTurnRow,
 } from "@/app/lib/conversation-db";
 import { callClaudeForJson } from "@/app/lib/claude-json";
 import { toErrorMessage } from "@/app/lib/api-error";
@@ -60,6 +62,29 @@ type ReviewResult = {
     highlight: string;
   };
 };
+
+/**
+ * Step C4 (review screen): "turnsAnsweredAlone" for a session, computed the
+ * same way handleEnd does it for the current session — pairing turns[i]'s
+ * transcript (the student's utterance) with turns[i+1]'s support_given (the
+ * tutor's response to it). Used both for the current session and, via
+ * fetchPreviousCompletedSession, for the "Last time: N" comparison — that
+ * value isn't persisted anywhere, so it's recomputed from that session's
+ * own turns rather than adding new DB columns.
+ */
+function computeTurnsAnsweredAloneStats(turns: ConversationTurnRow[]): {
+  turnsAnsweredAlone: number;
+  turnsTotal: number;
+} {
+  let turnsTotal = 0;
+  let turnsAnsweredAlone = 0;
+  for (let i = 0; i < turns.length - 1; i++) {
+    if (!turns[i].transcript) continue;
+    turnsTotal++;
+    if (turns[i + 1].support_given === "none") turnsAnsweredAlone++;
+  }
+  return { turnsAnsweredAlone, turnsTotal };
+}
 
 async function askClaudeText(params: {
   system?: string;
@@ -304,6 +329,19 @@ async function handleEnd(body: Record<string, unknown>) {
   const turns = await fetchConversationTurns(supabase, sessionId);
   const answeredTurns = turns.filter((t) => t.transcript);
 
+  // Step C4 (review screen): "Last time: N" comparison row. Independent of
+  // whether review scoring below succeeds — even an unreviewed session still
+  // has turnsAnsweredAlone data available from support_given.
+  const previousSessionRow = await fetchPreviousCompletedSession(
+    supabase,
+    session.user_id,
+    session.language,
+    sessionId
+  );
+  const previousSession = previousSessionRow
+    ? computeTurnsAnsweredAloneStats(await fetchConversationTurns(supabase, previousSessionRow.id))
+    : null;
+
   let feedbackPositive: string | null = null;
   let feedbackImprovement: string | null = null;
   let highlight: string | null = null;
@@ -316,6 +354,9 @@ async function handleEnd(body: Record<string, unknown>) {
   let missionsResult: { candoId: string; en: string; achieved: boolean }[] = [];
   let turnsAnsweredAlone = 0;
   let stageUp = false;
+  // Step C4 (review screen, "Score details" — Ryo-only): per-turn scores,
+  // read from the same review.turns the DB write below is sourced from.
+  let turnScores: { turnIndex: number; vocab: number; grammar: number; fluency: number }[] = [];
 
   if (answeredTurns.length > 0) {
     try {
@@ -359,6 +400,14 @@ async function handleEnd(body: Record<string, unknown>) {
         // 読み直さずにこの配列から phrases_used / support_given を組み立てる。
         targetTurn.phrases_used = phrasesUsed;
         (turnResult.vocab_used ?? []).forEach((w) => vocabSet.add(w));
+        if (turnResult.scores) {
+          turnScores.push({
+            turnIndex: turnResult.index,
+            vocab: turnResult.scores.vocab,
+            grammar: turnResult.scores.grammar,
+            fluency: turnResult.scores.fluency,
+          });
+        }
       }
       vocabUsedCount = vocabSet.size;
 
@@ -460,6 +509,7 @@ async function handleEnd(body: Record<string, unknown>) {
       feedbackImprovement = null;
       highlight = null;
       vocabUsedCount = 0;
+      turnScores = [];
     }
   }
 
@@ -478,7 +528,6 @@ async function handleEnd(body: Record<string, unknown>) {
     feedbackPositive,
     feedbackImprovement,
     highlight,
-    // Step C3 (Step C4 の振り返り画面が使う。今は生 JSON のまま表示)
     turnsAnsweredAlone,
     turnsTotal: answeredTurns.length,
     missions: missionsResult,
@@ -491,5 +540,8 @@ async function handleEnd(body: Record<string, unknown>) {
     })),
     stageUp,
     conversationStage,
+    // Step C4 (review screen)
+    previousSession,
+    turnScores,
   });
 }

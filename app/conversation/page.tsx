@@ -42,6 +42,38 @@ type HistoryTurn = CurrentTurn & {
   transcriptEn: string | null;
 };
 
+// Step C4: shape of a successful `action: "end"` response. Matches the
+// NextResponse.json(...) built in app/api/conversation/session/route.ts's
+// handleEnd(). `error` is set instead when the fetch itself failed (see
+// endSession()'s catch below) — in that case none of the other fields exist.
+type EndSessionResult = {
+  sessionId?: string;
+  speakingMs?: number;
+  turnCount?: number;
+  vocabUsedCount?: number;
+  feedbackPositive?: string | null;
+  feedbackImprovement?: string | null;
+  highlight?: string | null;
+  turnsAnsweredAlone?: number;
+  turnsTotal?: number;
+  missions?: { candoId: string; en: string; achieved: boolean }[];
+  candoProgress?: { candoId: string; en: string; before: number; after: number; justAchieved: boolean }[];
+  stageUp?: boolean;
+  conversationStage?: number;
+  previousSession?: { turnsAnsweredAlone: number; turnsTotal: number } | null;
+  turnScores?: { turnIndex: number; vocab: number; grammar: number; fluency: number }[];
+  error?: string;
+};
+
+/** mm:ss-ish formatting for the "N spoken" stat, e.g. 24s / 2m 40s. */
+function formatSpeakingTime(ms: number): string {
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return sec === 0 ? `${min}m` : `${min}m ${sec}s`;
+}
+
 const DURATION_OPTIONS_MIN = [3, 5, 10] as const;
 
 // Safety net: if elapsed time overruns the planned duration by this much and
@@ -137,7 +169,7 @@ export default function ConversationPage() {
   }, []);
   const [elapsedDisplaySec, setElapsedDisplaySec] = useState(0); // updated every second for the debug panel; safe to read during render (state, not a ref/Date.now() call)
 
-  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  const [result, setResult] = useState<EndSessionResult | null>(null);
 
   // Step C3: missions selected for this session (shown on the [2] intro
   // screen, English only). Populated by startSession(), which now runs when
@@ -336,6 +368,19 @@ export default function ConversationPage() {
     setIntroError(null);
     setPhase("select");
   }, [sessionId]);
+
+  // Step C4: result screen's "Talk again" — the session is already
+  // completed (unlike backToSelect above), so there's nothing to abandon;
+  // just reset back to scenario selection.
+  const talkAgain = useCallback(() => {
+    setSessionId(null);
+    setMissions([]);
+    setResult(null);
+    setSelectedScenarioId(null);
+    setSelectedDurationMin(null);
+    setIntroError(null);
+    setPhase("select");
+  }, []);
 
   const endSession = useCallback(async () => {
     if (!sessionId) return;
@@ -823,26 +868,248 @@ export default function ConversationPage() {
     );
   }
 
-  /* ---------------- [4] result ---------------- */
+  /* ---------------- [4] result (Step C4 review screen) ---------------- */
   if (phase === "result") {
+    const resultButtons = (
+      <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
+        <button
+          onClick={talkAgain}
+          style={{
+            flex: 1,
+            padding: 16,
+            fontSize: 16,
+            borderRadius: 12,
+            border: "1px solid #ff8c42",
+            background: "white",
+            color: "#ff8c42",
+            cursor: "pointer",
+          }}
+        >
+          Talk again
+        </button>
+        <Link
+          href="/"
+          style={{
+            flex: 1,
+            textAlign: "center",
+            padding: 16,
+            fontSize: 16,
+            borderRadius: 12,
+            background: "#ff8c42",
+            color: "white",
+            textDecoration: "none",
+            boxSizing: "border-box",
+          }}
+        >
+          Done
+        </Link>
+      </div>
+    );
+
+    // Fetch itself failed (see endSession()'s catch) — nothing else in
+    // `result` is populated, so just show the error and let them retry.
+    if (!result || result.error) {
+      return (
+        <main style={containerStyle}>
+          <div style={{ padding: 20 }}>
+            <div style={{ fontSize: 20, fontWeight: "bold", marginBottom: 16 }}>Session ended</div>
+            {result?.error && (
+              <div style={{ color: "#c00", marginBottom: 24, fontSize: 14 }}>⚠️ {result.error}</div>
+            )}
+            {resultButtons}
+          </div>
+        </main>
+      );
+    }
+
+    const turnsTotal = result.turnsTotal ?? 0;
+
+    // Design decision (step_c4 instructions): 0-turn sessions skip every
+    // scoring/mission/progress section entirely — there's nothing to show,
+    // and showing empty sections would look broken.
+    if (turnsTotal === 0) {
+      return (
+        <main style={containerStyle}>
+          <div style={{ padding: 20 }}>
+            <div style={{ fontSize: 20, fontWeight: "bold", marginBottom: 12 }}>Session ended</div>
+            <div style={{ fontSize: 16, color: "#666", marginBottom: 32 }}>
+              You didn&apos;t get to talk this time. Try again!
+            </div>
+            {resultButtons}
+          </div>
+        </main>
+      );
+    }
+
+    const turnsAnsweredAlone = result.turnsAnsweredAlone ?? 0;
+    const neededHelp = Math.max(0, turnsTotal - turnsAnsweredAlone);
+    const resultMissions = result.missions ?? [];
+    const resultCandoProgress = result.candoProgress ?? [];
+    const previousSession = result.previousSession ?? null;
+    const justAchievedCount = resultCandoProgress.filter((c) => c.justAchieved).length;
+    const improved = previousSession ? turnsAnsweredAlone > previousSession.turnsAnsweredAlone : false;
+
     return (
       <main style={containerStyle}>
-        <div style={{ padding: 20 }}>
-          <div style={{ fontSize: 20, fontWeight: "bold", marginBottom: 16 }}>Nice work!</div>
-          <pre
+        <div style={{ padding: "20px 20px 40px" }}>
+          {/* 10. Stage Up banner — design decision: a plain in-page banner,
+              NOT app/lib/stage-up-celebration.tsx's confetti modal (that's
+              the vocabulary side's celebration; a fuller version for
+              Conversation is deferred to Step C5). */}
+          {result.stageUp && (
+            <div
+              style={{
+                background: "#4caf50",
+                color: "white",
+                borderRadius: 12,
+                padding: "14px 16px",
+                marginBottom: 20,
+                textAlign: "center",
+              }}
+            >
+              <div style={{ fontSize: 16, fontWeight: "bold" }}>Stage {result.conversationStage} unlocked!</div>
+              <div style={{ fontSize: 13, marginTop: 2, opacity: 0.9 }}>
+                You finished everything in Stage {(result.conversationStage ?? 1) - 1}.
+              </div>
+            </div>
+          )}
+
+          {/* 1. Header */}
+          <div style={{ fontSize: 20, fontWeight: "bold" }}>Session done</div>
+          <div style={{ fontSize: 14, color: "#888", marginBottom: 20 }}>
+            Talking about {selectedScenario?.titleEn ?? "Japanese"} · {turnsTotal} {turnsTotal === 1 ? "turn" : "turns"}
+          </div>
+
+          {/* 2. Headline: absolute count, not a percentage — see the design
+              rationale in step_c4_review_screen_instructions.md. A % headline
+              punishes trying (one more attempted-but-helped turn lowers it),
+              which fights the app's actual top priority: talk a lot. */}
+          <div
             style={{
-              background: "#222",
-              color: "#eee",
-              padding: 16,
-              borderRadius: 8,
-              fontSize: 12,
-              overflowX: "auto",
-              whiteSpace: "pre-wrap",
-              marginBottom: 24,
+              textAlign: "center",
+              background: "white",
+              borderRadius: 16,
+              padding: "20px 16px",
+              marginBottom: 20,
             }}
           >
-            {JSON.stringify(result, null, 2)}
-          </pre>
+            <div style={{ fontSize: 14, color: "#666", marginBottom: 4 }}>You answered on your own</div>
+            <div style={{ fontSize: 48, fontWeight: "bold", color: "#ff8c42", lineHeight: 1 }}>
+              {turnsAnsweredAlone}
+            </div>
+            <div style={{ fontSize: 13, color: "#888", marginTop: 8 }}>
+              {turnsTotal} turns · needed help {neededHelp} {neededHelp === 1 ? "time" : "times"}
+            </div>
+            {previousSession && (
+              <div style={{ fontSize: 13, marginTop: 8, color: improved ? "#4caf50" : "#999" }}>
+                {improved ? "↗" : "•"} Last time: {previousSession.turnsAnsweredAlone}
+              </div>
+            )}
+          </div>
+
+          {/* 3. Today's missions — same achieved/not-achieved data as the
+              in-conversation checklist, but authoritative now (judgeCandos
+              ran at session end). No ✗, no red — "next time" instead. */}
+          {resultMissions.length > 0 && (
+            <div style={{ background: "white", borderRadius: 12, padding: 16, marginBottom: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: "bold", color: "#555", marginBottom: 10 }}>
+                Today&apos;s missions
+              </div>
+              {resultMissions.map((m) => (
+                <div
+                  key={m.candoId}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    fontSize: 14,
+                    color: m.achieved ? "#4caf50" : "#666",
+                    marginBottom: 6,
+                  }}
+                >
+                  <span>
+                    {m.achieved ? "✓" : "−"} {m.en}
+                  </span>
+                  {!m.achieved && <span style={{ fontSize: 12, color: "#aaa" }}>next time</span>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 4. Progress — only can-dos whose consecutive_success moved this
+              session (candoProgress is already filtered that way server-side). */}
+          {resultCandoProgress.length > 0 && (
+            <div style={{ background: "white", borderRadius: 12, padding: 16, marginBottom: 20 }}>
+              <div style={{ fontSize: 13, fontWeight: "bold", color: "#555", marginBottom: 10 }}>Progress</div>
+              {resultCandoProgress.map((c) => (
+                <div
+                  key={c.candoId}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    fontSize: 14,
+                    padding: "8px 10px",
+                    borderRadius: 8,
+                    background: c.justAchieved ? "#e8f5e9" : "transparent",
+                    marginBottom: 4,
+                    gap: 8,
+                  }}
+                >
+                  <span style={{ color: "#333" }}>{c.en}</span>
+                  <span style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                    <span style={{ color: "#4caf50", letterSpacing: 2 }}>
+                      {"●".repeat(Math.min(3, c.after))}
+                      {"○".repeat(Math.max(0, 3 - c.after))}
+                    </span>
+                    {c.justAchieved && (
+                      <span style={{ fontSize: 12, color: "#4caf50", fontWeight: "bold", whiteSpace: "nowrap" }}>
+                        You can do this now
+                      </span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 5. Best moment */}
+          {result.highlight && (
+            <div style={{ border: "2px solid #ff8c42", borderRadius: 12, padding: 16, marginBottom: 20 }}>
+              <div style={{ fontSize: 11, fontWeight: "bold", color: "#ff8c42", marginBottom: 6, letterSpacing: 1 }}>
+                BEST MOMENT
+              </div>
+              <div style={{ fontSize: 14, color: "#333", lineHeight: 1.5 }}>{result.highlight}</div>
+            </div>
+          )}
+
+          {/* 6. Try next time — exactly one, never more (feedbackPositive is
+              deliberately not shown at all — it overlaps with Best moment). */}
+          {result.feedbackImprovement && (
+            <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 16, marginBottom: 20 }}>
+              <div style={{ fontSize: 11, fontWeight: "bold", color: "#888", marginBottom: 6, letterSpacing: 1 }}>
+                TRY NEXT TIME
+              </div>
+              <div style={{ fontSize: 14, color: "#555", lineHeight: 1.5 }}>{result.feedbackImprovement}</div>
+            </div>
+          )}
+
+          {/* 7. Secondary stats */}
+          <div style={{ textAlign: "center", fontSize: 13, color: "#999", marginBottom: 20 }}>
+            {formatSpeakingTime(result.speakingMs ?? 0)} spoken · {result.vocabUsedCount ?? 0} words used ·{" "}
+            {justAchievedCount} new can-do
+          </div>
+
+          {/* 8. Score details — Ryo-only, gated behind ?debug=1 (not just
+              collapsed-by-default): vocab/grammar/fluency are the LLM's
+              subjective 1-5 scores, which don't stay stable across
+              sessions — that instability is exactly why this was kept out
+              of the headline metric in the first place. Showing it to a
+              child by default would surface the metric this screen's
+              whole design was built to avoid. */}
+          {debugEnabled && (result.turnScores?.length ?? 0) > 0 && (
+            <ScoreDetails turnScores={result.turnScores!} />
+          )}
 
           {debugEnabled && (
             <div
@@ -850,14 +1117,13 @@ export default function ConversationPage() {
                 background: "#f5f5f5",
                 borderRadius: 8,
                 padding: 16,
-                marginBottom: 24,
+                marginTop: 20,
+                marginBottom: 20,
                 fontSize: 12,
               }}
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <div style={{ fontWeight: "bold" }}>
-                  DEBUG: user_candos (stage {candoDebug?.stage ?? "?"})
-                </div>
+                <div style={{ fontWeight: "bold" }}>DEBUG: user_candos (stage {candoDebug?.stage ?? "?"})</div>
                 <button
                   onClick={fetchCandoDebug}
                   style={{ fontSize: 12, padding: "4px 10px", borderRadius: 6, border: "1px solid #ccc", background: "white", cursor: "pointer" }}
@@ -875,26 +1141,14 @@ export default function ConversationPage() {
                       .join("\n")
                   : "(not loaded — press Refresh)"}
               </pre>
+              <pre style={{ whiteSpace: "pre-wrap", fontFamily: "monospace", margin: "8px 0 0", maxHeight: 200, overflowY: "auto" }}>
+                {JSON.stringify(result, null, 2)}
+              </pre>
             </div>
           )}
 
-          <Link
-            href="/"
-            style={{
-              display: "block",
-              textAlign: "center",
-              width: "100%",
-              padding: 16,
-              fontSize: 18,
-              borderRadius: 12,
-              background: "#ff8c42",
-              color: "white",
-              textDecoration: "none",
-              boxSizing: "border-box",
-            }}
-          >
-            Return home
-          </Link>
+          {/* 9. Buttons */}
+          {resultButtons}
         </div>
       </main>
     );
@@ -1228,6 +1482,45 @@ export default function ConversationPage() {
         />
       )}
     </main>
+  );
+}
+
+/**
+ * Step C4 review screen, section 8: collapsed by default. Ryo-facing (to
+ * sanity-check the review scoring), not meant for Mirei to open.
+ */
+function ScoreDetails(props: {
+  turnScores: { turnIndex: number; vocab: number; grammar: number; fluency: number }[];
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%",
+          textAlign: "left",
+          padding: "10px 12px",
+          background: "#f5f5f5",
+          border: "none",
+          borderRadius: 8,
+          fontSize: 13,
+          color: "#888",
+          cursor: "pointer",
+        }}
+      >
+        Score details {open ? "▲" : "▼"}
+      </button>
+      {open && (
+        <div style={{ padding: "10px 12px", fontSize: 13, color: "#555" }}>
+          {props.turnScores.map((t) => (
+            <div key={t.turnIndex} style={{ marginBottom: 4 }}>
+              Turn {t.turnIndex} &nbsp; vocab {t.vocab} &nbsp; grammar {t.grammar} &nbsp; fluency {t.fluency}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 

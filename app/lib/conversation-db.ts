@@ -239,6 +239,34 @@ export async function abandonConversationSession(
   if (error) throw error;
 }
 
+/**
+ * Step C4 (review screen): the most recent OTHER completed session for the
+ * same user+language, used for the "Last time: N" comparison row. Excludes
+ * the current session explicitly (relevant when this is called right after
+ * completeConversationSession has already flipped the current session to
+ * 'completed'). Returns null if there is no prior completed session.
+ */
+export async function fetchPreviousCompletedSession(
+  supabase: SupabaseClient,
+  userId: string,
+  language: string,
+  excludeSessionId: string
+): Promise<ConversationSessionRow | null> {
+  const { data, error } = await supabase
+    .from("conversation_sessions")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("language", language)
+    .eq("status", "completed")
+    .neq("id", excludeSessionId)
+    .order("ended_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  return (data as ConversationSessionRow) ?? null;
+}
+
 export async function finalizeSessionReview(
   supabase: SupabaseClient,
   sessionId: string,

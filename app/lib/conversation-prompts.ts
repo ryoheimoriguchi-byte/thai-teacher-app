@@ -216,11 +216,25 @@ function candoActionLabel(ja: string): string {
   return ja.endsWith('ことができる') ? ja.slice(0, -'ことができる'.length) : ja;
 }
 
+// 方略ミッション（S1-basic-02「わからない」/ S1-basic-03「もう一度」)が
+// ミッションに含まれる場合の補足。2026-09-19: 方略 can-do がミッション候補に
+// 入るようになったのに合わせて追加 — この2つは「使ってみて」と直接言えない
+// 分、先生側が意図的に機会を作らないと会話の流れでは出てこないため。
+const STRATEGY_MISSION_NOTE = `
+## 方略ミッションについて
+今日のミッションに「わからない」「もう一度」を伝える表現が含まれています。
+生徒が「わからない」「もう一度」と言う機会を作るには、少しだけ難しい質問を
+したり、少し長めの文で話しかけたりして、生徒が聞き返したくなる場面を
+作ってください。ただし、わざと意地悪をしたり、生徒が答えられないほど
+難しくしたりしないこと。生徒が詰まったら、これまで通りやさしく助けてください。
+`.trim();
+
 function buildMissionInstruction(missions: ConversationCando[]): string {
   if (missions.length === 0) return '';
   const lines = missions
     .map((m, i) => `${i + 1}. [${m.id}] ${candoActionLabel(m.ja)}（例: ${m.example}）`)
     .join('\n');
+  const strategyNote = missions.some((m) => m.isStrategy) ? `\n\n${STRATEGY_MISSION_NOTE}` : '';
   return `
 ## きょうの ミッション
 この会話のなかで、生徒が次の表現を使う機会を必ず作ってください。
@@ -229,7 +243,7 @@ ${lines}
 
 機会を作るとは、生徒がその表現を使いたくなる質問や場面を出すことです。
 ただし「〜と言ってください」と直接指示してはいけません。
-生徒が使わなくても、責めたり催促したりしないでください。
+生徒が使わなくても、責めたり催促したりしないでください。${strategyNote}
 
 ## missions_used（記録用・暫定判定）
 直前の生徒の発話で、上のミッションのいずれかの表現が実際に使われていたら、

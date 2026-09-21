@@ -8,6 +8,13 @@
  *   - 機会なし（そもそもフレーズが出てこなかった）: 何もしない。連続は途切れない
  *   - 達成済み（achieved=true）は不変。二度と変えない
  *   - support_given が null のターンは成功として数えない（フラグ導入前のデータ除外）
+ *
+ * 方略 can-do（S1-basic-02 / S1-basic-03, isStrategy: true）は上記と別扱い:
+ *   - 支援の有無を問わない（support_given を見ない）
+ *   - 2026-09-19: ミッション候補には含める（以前は除外していた。会話の流れで
+ *     自然に出る機会がほとんどなく、構造的に達成されにくかったため）
+ *   - ただしミッションだったのに使われなくても、リセットは絶対にしない
+ *     （今日たまたま助けが要らなかっただけ、という可能性が高いため）
  */
 
 export interface ConversationCando {
@@ -19,7 +26,10 @@ export interface ConversationCando {
   example: string; // 表示用の例文（ひらがな）
   phraseIds: string[]; // 対応フレーズ。いずれか1つでカウント対象
   scenarioIds: string[]; // ミッションとして提示しうるシナリオ（freetalk は含めない）
-  /** 方略 can-do（S1-basic-02 / S1-basic-03）。支援の有無を問わず、ミッションにもしない。失敗リセットもない。 */
+  /**
+   * 方略 can-do（S1-basic-02 / S1-basic-03）。支援の有無を問わず、失敗リセットもない。
+   * 2026-09-19: ミッション候補からは除外しなくなった（selectMissionCandos 参照）。
+   */
   isStrategy?: boolean;
 }
 
@@ -50,7 +60,9 @@ const STAGE_1_CANDOS: ConversationCando[] = [
     ja: 'わからないときに、わからないと伝えることができる',
     example: 'わかりません。',
     phraseIds: ['P-01'],
-    scenarioIds: [],
+    // 2026-09-19: 方略 can-do は場面に依存しないため、freetalk を除く全
+    // シナリオに紐づける（以前は空でミッション候補になれなかった）。
+    scenarioIds: ['shopping', 'family', 'school', 'food'],
     isStrategy: true,
   },
   {
@@ -61,7 +73,8 @@ const STAGE_1_CANDOS: ConversationCando[] = [
     ja: 'もう一度言ってほしい、ゆっくり言ってほしいと頼むことができる',
     example: 'もういちど いってください。',
     phraseIds: ['P-02'],
-    scenarioIds: [],
+    // 2026-09-19: 上の S1-basic-02 と同じ理由で全シナリオに紐づける。
+    scenarioIds: ['shopping', 'family', 'school', 'food'],
     isStrategy: true,
   },
   {
@@ -337,9 +350,12 @@ export function selectMissionCandos(params: {
   currentStage: number;
   progressByCandoId: Map<string, CandoProgressState>;
 }): ConversationCando[] {
+  // 2026-09-19: 方略 can-do（isStrategy）もミッション候補に含める（以前は
+  // 除外していた）。失敗判定をしない扱いは judgeCandos 側のロジックが
+  // 引き続き担っている（isStrategy 分岐は wasMission を見ない）ので、ここで
+  // 除外する必要はない。
   const candidates = ALL_CANDOS.filter(
     (c) =>
-      !c.isStrategy &&
       c.stage <= params.currentStage &&
       c.scenarioIds.includes(params.scenarioId) &&
       !(params.progressByCandoId.get(c.id)?.achieved ?? false)
@@ -415,7 +431,9 @@ export function judgeCandos(params: {
     let consecutive = prev.consecutiveSuccess;
 
     if (cando.isStrategy) {
-      // 方略 can-do: 支援の有無を問わない。失敗もない。
+      // 方略 can-do: 支援の有無を問わない。ミッション候補にはなり得るが
+      // （2026-09-19〜）、意図的に wasMission を見ない — ミッションだった
+      // のに使われなくても何もしない（リセットしない）。
       const used = params.events.some((e) => e.phrasesUsed.some((p) => cando.phraseIds.includes(p)));
       if (used) consecutive += 1;
     } else {
