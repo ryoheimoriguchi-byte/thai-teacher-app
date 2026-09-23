@@ -22,6 +22,7 @@ import { SCENARIOS, ConversationScenario } from "../lib/conversation-scenarios";
 import { FALLBACK_CLOSING_LINE } from "../lib/conversation-prompts";
 import { useRecorder } from "../lib/use-recorder";
 import { useAudioPlayer } from "../lib/use-audio-player";
+import { getAudioContext, unlockAudio } from "../lib/audio-context";
 import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 
 const supabase = createClient(
@@ -225,7 +226,7 @@ export default function ConversationPage() {
   // playback ahead of time) — see enterConversation() below. State here is
   // read by the ?debug=1 panel only; never shown in the normal UI.
   const [micPermission, setMicPermission] = useState<"unknown" | "granted" | "denied">("unknown");
-  const [audioCtxState, setAudioCtxState] = useState<"unknown" | "running" | "suspended">("unknown");
+  const [audioCtxState, setAudioCtxState] = useState<AudioContextState | "unknown">("unknown");
   const [introError, setIntroError] = useState<string | null>(null);
   const [preparingStart, setPreparingStart] = useState(false);
 
@@ -312,10 +313,14 @@ export default function ConversationPage() {
     setPreparingStart(true);
 
     // Must be called synchronously in this click handler, before any
-    // `await` below — see the doc comment on useAudioPlayer's unlock() for
-    // why the ctx.resume() call itself needs to happen inside the user
-    // gesture on iOS Safari.
-    const unlockPromise = audioPlayer.unlock();
+    // `await` below — see audio-context.ts's unlockAudio() doc comment for
+    // why. Logged to timingLog (visible in ?debug=1) so the before/after
+    // state around the mic permission dialog can actually be verified on
+    // a real device, per the Step C4.1 investigation.
+    addTimingLog(`Start tap: ctx.state=${getAudioContext().state}`);
+    unlockAudio();
+    setAudioCtxState(getAudioContext().state);
+    addTimingLog(`unlockAudio done: ctx.state=${getAudioContext().state}`);
 
     (async () => {
       // Mic permission: request-then-immediately-release. This call is only
@@ -336,15 +341,19 @@ export default function ConversationPage() {
         return; // stay on the intro screen — don't enter a conversation the mic can't drive
       }
 
-      const state = await unlockPromise;
-      setAudioCtxState(state);
+      // State right after the mic permission dialog has closed — this is
+      // the moment the investigation found iOS Safari can silently
+      // re-suspend an already-"running" context (dialogs act like a brief
+      // backgrounding of the page).
+      addTimingLog(`mic dialog closed: ctx.state=${getAudioContext().state}`);
+      setAudioCtxState(getAudioContext().state);
 
       sessionStartedAtRef.current = Date.now();
       setElapsedDisplaySec(0);
       setPreparingStart(false);
       setPhase("conversation");
     })();
-  }, [audioPlayer]);
+  }, [addTimingLog]);
 
   // [2] "← Choose a different topic": since startSession() (above) already
   // created the session + selected missions by this point, going back
@@ -1160,6 +1169,12 @@ export default function ConversationPage() {
 
   const handleMicTap = () => {
     if (recState === "idle") {
+      // recorder.startRecording() itself calls unlockAudio() synchronously
+      // at its top, before getUserMedia — see use-recorder.ts and its own
+      // debugLog for the before/after state around that. This line just
+      // marks "before the first recording" in the same timingLog the
+      // Start/Listen taps log to, for an at-a-glance timeline in ?debug=1.
+      addTimingLog(`mic tap (before recording): ctx.state=${getAudioContext().state}`);
       recorder.startRecording();
     } else if (recState === "recording") {
       recorder.stopManually();
@@ -1282,7 +1297,17 @@ export default function ConversationPage() {
               </div>
               <div style={{ display: "flex", gap: 12, marginTop: 4, marginLeft: 4 }}>
                 <button
-                  onClick={() => audioPlayer.play(item.text)}
+                  onClick={() => {
+                    // audioPlayer.play() calls unlockAudio() synchronously at
+                    // its own top (before its first `await`), so by the time
+                    // this call returns control here, unlockAudio has
+                    // already run — logging before/after around it, per the
+                    // Step C4.1 investigation.
+                    addTimingLog(`Listen tap (before unlockAudio): ctx.state=${getAudioContext().state}`);
+                    audioPlayer.play(item.text);
+                    addTimingLog(`Listen tap (after unlockAudio): ctx.state=${getAudioContext().state}`);
+                    setAudioCtxState(getAudioContext().state);
+                  }}
                   style={{ background: "none", border: "none", color: "#888", fontSize: 12, cursor: "pointer", padding: 0 }}
                 >
                   🔊 {audioPlayer.state === "loading" ? "..." : "Listen"}
@@ -1370,7 +1395,16 @@ export default function ConversationPage() {
             <div style={{ color: "#c00", fontSize: 14, marginBottom: 12 }}>⚠️ {turnError}</div>
             <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
               <button
-                onClick={() => setTurnError(null)}
+                onClick={() => {
+                  // Insurance unlock, per the Step C4.1 instructions — this
+                  // tap doesn't itself play/record anything, but it's one
+                  // of the four designated "re-assert audio is unlocked"
+                  // taps, since it's the recovery point after a failure.
+                  addTimingLog(`Try again tap: ctx.state=${getAudioContext().state}`);
+                  unlockAudio();
+                  setAudioCtxState(getAudioContext().state);
+                  setTurnError(null);
+                }}
                 style={{
                   padding: "10px 16px",
                   borderRadius: 20,
@@ -1538,7 +1572,7 @@ function DebugPanel(props: {
   plannedDurationSec: number;
   timingLog: string[];
   micPermission: "unknown" | "granted" | "denied";
-  audioCtxState: "unknown" | "running" | "suspended";
+  audioCtxState: AudioContextState | "unknown";
 }) {
   const [open, setOpen] = useState(false);
   return (

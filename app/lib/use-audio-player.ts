@@ -12,10 +12,18 @@
  * This hook is the ONLY place that starts playback, so if autoplay ever
  * becomes viable (see T-24), only this file needs to change.
  *
+ * Step C4.1: this now shares ONE AudioContext with the recorder's
+ * silence-detection AnalyserNode (see audio-context.ts) rather than owning
+ * its own — a real-device bug (tutor's first line had no sound on Listen
+ * until after the first recording) traced partly to these being two
+ * separate AudioContext instances. See audio-context.ts's doc comment for
+ * the full investigation.
+ *
  * Client-only. Must be called from a component with "use client".
  */
 
 import { useCallback, useRef, useState } from "react";
+import { unlockAudio } from "./audio-context";
 
 export type PlaybackState = "idle" | "loading" | "playing" | "error";
 
@@ -30,7 +38,6 @@ export function useAudioPlayer() {
   const [state, setState] = useState<PlaybackState>("idle");
   const [error, setError] = useState<string | null>(null);
 
-  const ctxRef = useRef<AudioContext | null>(null);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const generationRef = useRef(0);
 
@@ -56,15 +63,12 @@ export function useAudioPlayer() {
     setError(null);
 
     try {
-      const Ctx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (!ctxRef.current) ctxRef.current = new Ctx();
-      const ctx = ctxRef.current;
-      // This is called synchronously within the tap handler's call stack (the
-      // caller must not await anything before calling play()), so this resume()
-      // happens within the user gesture — no separate "unlock" step is needed.
-      ctx.resume().catch(() => {});
+      // Must be called synchronously here, before the `await fetch()` below
+      // — see audio-context.ts's unlockAudio() doc comment for why resume()
+      // alone (the old implementation here) isn't always enough on iOS
+      // Safari, and why this needs to happen inside the tap's synchronous
+      // call stack (the caller of play() must not await anything first).
+      const ctx = unlockAudio();
 
       const res = await fetch("/api/conversation/tts", {
         method: "POST",
@@ -155,32 +159,5 @@ export function useAudioPlayer() {
     }
   }, []);
 
-  /**
-   * Unlocks the AudioContext (creates it if needed and calls resume()) WITHOUT
-   * playing anything. Added so the intro screen's "Start" tap — itself a user
-   * gesture — can pre-unlock playback before the conversation screen is even
-   * shown, instead of overloading the first recording tap with "also unlock
-   * audio". Must be called synchronously within the click handler (i.e. the
-   * caller must not `await` anything before calling this) for the same
-   * iOS-Safari-gesture reason documented on `play()` above: the ctx.resume()
-   * call itself (not the awaiting of its result) is what needs to happen
-   * inside the gesture's synchronous call stack.
-   */
-  const unlock = useCallback((): Promise<"running" | "suspended" | "unknown"> => {
-    try {
-      const Ctx =
-        window.AudioContext ||
-        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      if (!ctxRef.current) ctxRef.current = new Ctx();
-      const ctx = ctxRef.current;
-      return ctx
-        .resume()
-        .then(() => ctx.state as "running" | "suspended")
-        .catch(() => "unknown" as const);
-    } catch {
-      return Promise.resolve("unknown");
-    }
-  }, []);
-
-  return { state, error, play, unlock };
+  return { state, error, play };
 }

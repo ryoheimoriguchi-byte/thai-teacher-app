@@ -12,6 +12,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getAudioContext, unlockAudio } from "./audio-context";
 
 export type RecorderState = "idle" | "recording" | "grace" | "stopped";
 
@@ -91,7 +92,12 @@ export function useRecorder(options: UseRecorderOptions) {
   }, []);
 
   const streamRef = useRef<MediaStream | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
+  // Step C4.1: no longer this hook's own AudioContext — shared with
+  // playback via audio-context.ts (see that file's doc comment for why:
+  // a real-device bug traced partly to recording and playback each having
+  // their own separate AudioContext instance). This hook must never call
+  // .close() on the shared context; only disconnect() its own nodes below.
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const segmentsRef = useRef<Blob[]>([]);
@@ -105,6 +111,25 @@ export function useRecorder(options: UseRecorderOptions) {
   // recording (i.e. across any "keep talking" continuations). Reset to 0
   // once onRecordingComplete has been called for that recording.
   const accumulatedMsRef = useRef(0);
+
+  // Disconnects (but does NOT close — see audio-context.ts) this hook's own
+  // nodes on the shared AudioContext. Called before setting up a fresh
+  // analyser for a new recording, and on unmount, so nodes from a finished
+  // recording don't linger forever on the long-lived shared context.
+  const disconnectAnalyser = () => {
+    try {
+      sourceNodeRef.current?.disconnect();
+    } catch {
+      // already disconnected
+    }
+    try {
+      analyserRef.current?.disconnect();
+    } catch {
+      // already disconnected
+    }
+    sourceNodeRef.current = null;
+    analyserRef.current = null;
+  };
 
   const stopMonitorLoop = () => {
     if (rafRef.current !== null) {
@@ -219,6 +244,17 @@ export function useRecorder(options: UseRecorderOptions) {
     setSilenceMs(0);
     setElapsedMs(0);
 
+    // Step C4.1: must happen synchronously here, before the
+    // `await getUserMedia()` below (which pops a native permission dialog
+    // the first time) — see audio-context.ts's unlockAudio() doc comment.
+    // This also doubles as the "does a recording somehow re-enable Listen"
+    // recovery path found during the real-device investigation, now made
+    // deliberate: every recording tap re-forces the SAME shared context's
+    // output path back up, which is what playback also uses.
+    addDebugLog(`unlockAudio (before getUserMedia): ctx.state=${getAudioContext().state}`);
+    unlockAudio();
+    addDebugLog(`unlockAudio done: ctx.state=${getAudioContext().state}`);
+
     let stream: MediaStream;
     try {
       addDebugLog("calling getUserMedia");
@@ -284,13 +320,17 @@ export function useRecorder(options: UseRecorderOptions) {
     );
 
     try {
-      const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const audioCtx = audioCtxRef.current ?? new Ctx();
-      audioCtxRef.current = audioCtx;
+      // Disconnect any leftover analyser/source from a previous recording
+      // before creating fresh ones — the shared context itself (see
+      // audio-context.ts) is long-lived and must never be closed, but its
+      // nodes from a finished recording shouldn't linger forever.
+      disconnectAnalyser();
+      const audioCtx = getAudioContext(); // shared with playback — already unlocked by unlockAudio() above
       const source = audioCtx.createMediaStreamSource(stream);
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 2048;
       source.connect(analyser);
+      sourceNodeRef.current = source;
       analyserRef.current = analyser;
       addDebugLog("silence-detection AudioContext ready");
     } catch (e) {
@@ -344,6 +384,11 @@ export function useRecorder(options: UseRecorderOptions) {
       stopMonitorLoop();
       if (graceTimerRef.current) window.clearInterval(graceTimerRef.current);
       streamRef.current?.getTracks().forEach((t) => t.stop());
+      // Disconnect this hook's own nodes, but NEVER close the shared
+      // AudioContext here (or anywhere) — see audio-context.ts. Playback
+      // uses the same context and must keep working after this hook
+      // unmounts (e.g. leaving the conversation page).
+      disconnectAnalyser();
     };
   }, []);
 
