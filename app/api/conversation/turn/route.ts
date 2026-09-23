@@ -48,6 +48,10 @@ export async function POST(req: NextRequest) {
         ? Math.round(recordingMsRaw)
         : null;
     const isClosing = Boolean(body.isClosing);
+    // Step C4.2: did the student press "Show English" on the tutor line
+    // they're now replying to, before answering? Recorded on the same row
+    // as their transcript (the row whose tutor_text they were shown).
+    const translationShown = Boolean(body.translationShown);
 
     if (!sessionId || typeof transcript !== "string") {
       return NextResponse.json(
@@ -152,6 +156,7 @@ export async function POST(req: NextRequest) {
       transcript,
       recordingMs,
       charCount,
+      translationShown,
     });
     await insertConversationTurn(supabase, {
       sessionId,

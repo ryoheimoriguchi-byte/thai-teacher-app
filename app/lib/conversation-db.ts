@@ -21,6 +21,8 @@ export type ConversationSessionRow = {
   language: string;
   scenario_id: string;
   planned_duration_sec: number;
+  /** Step C4.2: ラリー数制セッションの目標ラリー数。時間ベースの旧セッションは null。 */
+  planned_turns: number | null;
   actual_duration_sec: number | null;
   speaking_ms: number;
   turn_count: number;
@@ -73,6 +75,12 @@ export type ConversationTurnRow = {
   support_given: string | null;
   /** 直前の生徒の発話が問いかけにどう応答できたか（記録用、UI非表示）。最初のターンは null。 */
   response_quality: string | null;
+  /**
+   * Step C4.2: この行の tutor_text（先生の発話）に対して、生徒が Show English
+   * を押してから答えたか。「助けを借りた」ターンとして扱う（英訳を見る/言い換え
+   * を求めるのと同じ扱い）。answeredAlone 判定と judgeCandos の成功判定の両方に使う。
+   */
+  translation_shown: boolean;
   created_at: string;
 };
 
@@ -149,6 +157,8 @@ export async function createConversationSession(
     language: string;
     scenarioId: string;
     plannedDurationSec: number;
+    /** Step C4.2: ラリー数制セッションの目標ラリー数。時間ベースなら省略。 */
+    plannedTurns?: number | null;
     /** Step C3: このセッションで提示する can-do ミッション。freetalk では [] を渡す。 */
     missionCandoIds?: string[];
   }
@@ -160,6 +170,7 @@ export async function createConversationSession(
       language: params.language,
       scenario_id: params.scenarioId,
       planned_duration_sec: params.plannedDurationSec,
+      planned_turns: params.plannedTurns ?? null,
       mission_cando_ids: params.missionCandoIds ?? [],
     })
     .select()
@@ -307,6 +318,53 @@ export async function fetchConversationTurns(
   return (data as ConversationTurnRow[]) ?? [];
 }
 
+/**
+ * Step C5 (Achievement Talking tab): all `completed` sessions for a
+ * user+language, used for the累計指標 (conversations / on your own% / min
+ * spoken). Small personal-app scale, so a single query is fine.
+ */
+export async function fetchCompletedConversationSessions(
+  supabase: SupabaseClient,
+  userId: string,
+  language: string
+): Promise<ConversationSessionRow[]> {
+  const { data, error } = await supabase
+    .from("conversation_sessions")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("language", language)
+    .eq("status", "completed");
+
+  if (error) throw error;
+  return (data as ConversationSessionRow[]) ?? [];
+}
+
+/**
+ * All turns for a batch of sessions in one query (avoids N+1 when computing
+ * turnsAnsweredAlone across every completed session). Grouped by session_id,
+ * each group already ordered by turn_index.
+ */
+export async function fetchConversationTurnsForSessions(
+  supabase: SupabaseClient,
+  sessionIds: string[]
+): Promise<Map<string, ConversationTurnRow[]>> {
+  const map = new Map<string, ConversationTurnRow[]>();
+  if (sessionIds.length === 0) return map;
+
+  const { data, error } = await supabase
+    .from("conversation_turns")
+    .select("*")
+    .in("session_id", sessionIds)
+    .order("turn_index", { ascending: true });
+
+  if (error) throw error;
+  for (const row of (data as ConversationTurnRow[]) ?? []) {
+    if (!map.has(row.session_id)) map.set(row.session_id, []);
+    map.get(row.session_id)!.push(row);
+  }
+  return map;
+}
+
 export async function insertConversationTurn(
   supabase: SupabaseClient,
   params: {
@@ -346,6 +404,8 @@ export async function updateTurnTranscript(
     transcript: string;
     recordingMs: number | null;
     charCount: number;
+    /** Step C4.2: この行の tutor_text に答える前に Show English を押したか。 */
+    translationShown: boolean;
   }
 ): Promise<void> {
   const { error } = await supabase
@@ -354,6 +414,7 @@ export async function updateTurnTranscript(
       transcript: params.transcript,
       recording_ms: params.recordingMs,
       char_count: params.charCount,
+      translation_shown: params.translationShown,
     })
     .eq("id", turnId);
 
@@ -393,6 +454,7 @@ export async function resetTurnToOpen(
       phrases_used: [],
       vocab_used: [],
       bonus_words: [],
+      translation_shown: false,
     })
     .eq("id", turnId);
 

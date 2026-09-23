@@ -332,6 +332,31 @@ export function candosForStage(stage: number): ConversationCando[] {
 }
 
 /* ------------------------------------------------------------------ */
+/* Step C5: Achievement「Talking」タブ用の Stage メタデータ              */
+/* ------------------------------------------------------------------ */
+
+/** Stage 1〜5 の表示名・説明。3〜5 は can-do 未定義だが、天井として枠だけ表示する。 */
+export const STAGE_INFO: { stage: number; name: string; description: string }[] = [
+  { stage: 1, name: 'First words', description: 'Answer with single words and set phrases' },
+  { stage: 2, name: 'Simple sentences', description: 'Say a bit more than one word' },
+  { stage: 3, name: 'Asking & explaining', description: 'Ask questions and give reasons' },
+  { stage: 4, name: 'Past & plans', description: 'Talk about yesterday and tomorrow' },
+  { stage: 5, name: 'Real conversations', description: 'Keep a conversation going' },
+];
+
+/** トピック id → 表示ラベル（Achievement タブの見出し）。 */
+export const TOPIC_LABELS: Record<string, string> = {
+  basic: 'Basics',
+  shop: 'Shopping',
+  family: 'Family',
+  food: 'Food',
+  school: 'School',
+  play: 'Play',
+  daily: 'Daily',
+  out: 'Out and about',
+};
+
+/* ------------------------------------------------------------------ */
 /* ミッション選定                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -385,6 +410,12 @@ export interface CandoJudgmentEvent {
    * null は support_given 導入前のデータ（このイベントは成功として数えない）。
    */
   supportGiven: string | null;
+  /**
+   * Step C4.2: 生徒がこの発話をする前に、先生のその発話に対して Show
+   * English を押していたか。押していれば「助けを借りた」ため、非方略
+   * can-do の成功判定からは除外する（方略 can-do は対象外）。
+   */
+  translationShown: boolean;
 }
 
 export interface CandoJudgmentResult {
@@ -439,7 +470,10 @@ export function judgeCandos(params: {
     } else {
       const wasMission = params.missionCandoIds.includes(cando.id);
       const success = params.events.some(
-        (e) => e.supportGiven === 'none' && e.phrasesUsed.some((p) => cando.phraseIds.includes(p))
+        (e) =>
+          e.supportGiven === 'none' &&
+          !e.translationShown &&
+          e.phrasesUsed.some((p) => cando.phraseIds.includes(p))
       );
       if (success) {
         consecutive += 1;
@@ -464,4 +498,41 @@ export function judgeCandos(params: {
   }
 
   return results;
+}
+
+/* ------------------------------------------------------------------ */
+/* 「自分で答えた」統計（振り返り画面・累計指標・can-do 判定で共通利用）  */
+/* ------------------------------------------------------------------ */
+
+/** turnsAnsweredAlone の判定に必要な最小限の行の形（conversation_turns の一部）。 */
+export interface TurnAnsweredAloneRow {
+  transcript: string | null;
+  support_given: string | null;
+  translation_shown: boolean;
+}
+
+/**
+ * セッション内の「自分で答えたターン数」を数える、唯一の判定ロジック。
+ * turns[i] の transcript（生徒の発話）を、turns[i+1].support_given（それに
+ * 対する先生の返答が与えた支援）と turns[i].translation_shown（その先生の
+ * 発話を Show English してから答えたか）の両方で判定する。
+ *
+ * 呼び出し元: 振り返り画面（現在のセッション・前回セッション比較）、
+ * judgeCandos に渡す events の元データ、Achievement タブの累計指標。
+ * ここ以外で同じ判定を書かないこと。
+ */
+export function computeTurnsAnsweredAloneStats(turns: TurnAnsweredAloneRow[]): {
+  turnsAnsweredAlone: number;
+  turnsTotal: number;
+} {
+  let turnsTotal = 0;
+  let turnsAnsweredAlone = 0;
+  for (let i = 0; i < turns.length - 1; i++) {
+    if (!turns[i].transcript) continue;
+    turnsTotal++;
+    if (turns[i + 1].support_given === 'none' && !turns[i].translation_shown) {
+      turnsAnsweredAlone++;
+    }
+  }
+  return { turnsAnsweredAlone, turnsTotal };
 }

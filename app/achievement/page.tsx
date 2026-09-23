@@ -25,6 +25,7 @@ import {
   markModuleBadgesAsViewed,
 } from "@/app/lib/badges";
 import { BadgeDetailModal } from "@/app/lib/badge-earned-modal";
+import { TalkingTab } from "./talking-tab";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -53,7 +54,7 @@ const MODULE_TABS: AchievementModuleTab[] = [
   { id: "sentence", label: "Sentence", modules: ["sentence"] },
 ];
 
-type SubTab = "badges" | "timeline";
+type SubTab = "badges" | "timeline" | "talking";
 type TimelineView = "new" | "total";
 
 const TIMELINE_CHART_HEIGHT = 280;
@@ -332,6 +333,7 @@ export default function AchievementPage() {
           [
             { id: "badges" as SubTab, label: "🏆 Badges" },
             { id: "timeline" as SubTab, label: "📊 Timeline" },
+            { id: "talking" as SubTab, label: "💬 Talking" },
           ] as const
         ).map((t) => (
           <button
@@ -655,6 +657,8 @@ export default function AchievementPage() {
           )}
         </>
       )}
+
+      {subTab === "talking" && <TalkingTab userId={currentUser.id} language={currentUser.language} />}
 
       <BadgeDetailModal
         open={selectedBadge !== null}

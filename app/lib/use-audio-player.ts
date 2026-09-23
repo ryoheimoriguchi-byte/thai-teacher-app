@@ -23,7 +23,7 @@
  */
 
 import { useCallback, useRef, useState } from "react";
-import { unlockAudio } from "./audio-context";
+import { unlockAudio, logAudioDebug } from "./audio-context";
 
 export type PlaybackState = "idle" | "loading" | "playing" | "error";
 
@@ -76,6 +76,7 @@ export function useAudioPlayer() {
         body: JSON.stringify({ text, stream: true, format: "pcm" }),
       });
       if (myGeneration !== generationRef.current) return; // superseded by a newer tap
+      logAudioDebug(`play(): TTS fetch responded status=${res.status} ok=${res.ok} hasBody=${Boolean(res.body)}`);
       if (!res.ok || !res.body) {
         throw new Error(`TTS request failed (status ${res.status})`);
       }
@@ -84,12 +85,20 @@ export function useAudioPlayer() {
       let leftover: Uint8Array = new Uint8Array(0);
       let nextStartTime = 0;
       let scheduledAny = false;
+      // Investigation items 7/8: previously there was no way to tell, from
+      // a real device, whether the stream actually delivered bytes or
+      // whether the scheduled buffer sources ever finished playing.
+      let totalBytesReceived = 0;
+      let chunksScheduled = 0;
+      let chunksEnded = 0;
+      let streamDone = false;
 
       const reader = res.body.getReader();
       while (true) {
         const { done, value } = await reader.read();
         if (myGeneration !== generationRef.current) return; // superseded by a newer tap
         if (done) break;
+        totalBytesReceived += value.byteLength;
 
         let chunk: Uint8Array = value as Uint8Array;
         if (leftover.length > 0) {
@@ -120,6 +129,17 @@ export function useAudioPlayer() {
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(ctx.destination);
+        chunksScheduled++;
+        source.onended = () => {
+          chunksEnded++;
+          // Only log once, when every scheduled chunk (for this generation,
+          // i.e. not superseded by a newer tap) has actually finished
+          // playing — confirms the output path was live end-to-end, not
+          // just that start() was called (investigation item 8).
+          if (myGeneration === generationRef.current && streamDone && chunksEnded === chunksScheduled) {
+            logAudioDebug(`play(): all ${chunksScheduled} chunk(s) finished (onended) at ctx.currentTime=${ctx.currentTime.toFixed(3)}`);
+          }
+        };
 
         if (!scheduledAny) setState("playing");
 
@@ -136,11 +156,23 @@ export function useAudioPlayer() {
         if (nextStartTime < now + 0.01) {
           nextStartTime = now + 0.03; // small lookahead margin
         }
+        if (!scheduledAny) {
+          // Investigation item 6/7 follow-up: confirms the AudioContext's
+          // clock is actually advancing (a suspended/dead context would
+          // show ctx.currentTime frozen across taps) and that a real,
+          // non-empty buffer was decoded from the TTS response.
+          logAudioDebug(
+            `play(): first chunk scheduled at ctx.currentTime=${now.toFixed(3)} startAt=${nextStartTime.toFixed(3)} bufferDuration=${audioBuffer.duration.toFixed(3)}`
+          );
+        }
         source.start(nextStartTime);
         nextStartTime += audioBuffer.duration;
         activeSourcesRef.current.push(source);
         scheduledAny = true;
       }
+      streamDone = true;
+
+      logAudioDebug(`play(): stream ended, totalBytesReceived=${totalBytesReceived}, chunksScheduled=${chunksScheduled}`);
 
       if (!scheduledAny) {
         if (myGeneration === generationRef.current) setState("idle");
@@ -152,8 +184,10 @@ export function useAudioPlayer() {
         if (myGeneration === generationRef.current) setState("idle");
       }, remainingMs + 50);
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      logAudioDebug(`play(): failed: ${message}`);
       if (myGeneration === generationRef.current) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(message);
         setState("error");
       }
     }

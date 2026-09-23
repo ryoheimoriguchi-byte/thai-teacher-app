@@ -24,6 +24,38 @@
 
 let ctx: AudioContext | null = null;
 
+/**
+ * Step C4.2 (re-investigation, 2026-09-23): the previous unlockAudio() fix
+ * (this file) did NOT resolve the real-device bug on its own — the tutor's
+ * first Listen after entering the conversation screen still sometimes had
+ * no sound. Investigation items 6/7/8 in the instructions this was built
+ * from turned out to be *unanswerable* with the code as it stood: every
+ * failure path here and in use-audio-player.ts's play() silently swallowed
+ * its own error, so there was no way to tell, from a real device, whether
+ * unlockAudio() itself was throwing, whether the TTS fetch was failing, or
+ * whether playback nodes were actually completing.
+ *
+ * This logger is purely observational — it changes NO behavior, only adds
+ * visibility into ?debug=1's timing log. use-audio-player.ts also reports
+ * through it (fetch byte counts, onended, ctx.currentTime/buffer duration)
+ * so all audio-pipeline diagnostics land in one place. The page registers
+ * itself as the sink (see app/conversation/page.tsx) via
+ * setAudioDebugLogger(); logAudioDebug() is a no-op before that happens
+ * (e.g. if this module is ever used outside the conversation page).
+ */
+type AudioDebugLogger = (msg: string) => void;
+let debugLogger: AudioDebugLogger | null = null;
+
+/** Registers (or clears, with null) the sink for logAudioDebug() below. */
+export function setAudioDebugLogger(fn: AudioDebugLogger | null): void {
+  debugLogger = fn;
+}
+
+/** Used by this file and use-audio-player.ts to report into ?debug=1's log. */
+export function logAudioDebug(msg: string): void {
+  debugLogger?.(msg);
+}
+
 /** The one AudioContext for the whole app. Created lazily, on first use. */
 export function getAudioContext(): AudioContext {
   if (!ctx) {
@@ -55,8 +87,10 @@ export function getAudioContext(): AudioContext {
  */
 export function unlockAudio(): AudioContext {
   const audioCtx = getAudioContext();
-  audioCtx.resume().catch(() => {
-    // best-effort; the silent-buffer trick below still runs regardless
+  audioCtx.resume().catch((e: unknown) => {
+    // best-effort; the silent-buffer trick below still runs regardless —
+    // but log it, since a rejection here was previously invisible.
+    logAudioDebug(`unlockAudio: resume() rejected: ${e instanceof Error ? e.message : String(e)}`);
   });
   try {
     const buf = audioCtx.createBuffer(1, 1, audioCtx.sampleRate);
@@ -64,8 +98,10 @@ export function unlockAudio(): AudioContext {
     src.buffer = buf;
     src.connect(audioCtx.destination);
     src.start(0);
-  } catch {
-    // best-effort — if this throws, the resume() call above is still in flight
+  } catch (e) {
+    // best-effort — if this throws, the resume() call above is still in
+    // flight. Previously silent; now logged (investigation item 6).
+    logAudioDebug(`unlockAudio: silent buffer start() threw: ${e instanceof Error ? e.message : String(e)}`);
   }
   return audioCtx;
 }

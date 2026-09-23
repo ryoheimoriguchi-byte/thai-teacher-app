@@ -7,6 +7,7 @@ import {
   selectMissionCandos,
   judgeCandos,
   getCando,
+  computeTurnsAnsweredAloneStats,
   type CandoProgressState,
   type CandoJudgmentEvent,
 } from "@/app/lib/conversation-candos";
@@ -31,7 +32,6 @@ import {
   getOrCreateConversationStage,
   setConversationStage,
   type ConversationScores,
-  type ConversationTurnRow,
 } from "@/app/lib/conversation-db";
 import { callClaudeForJson } from "@/app/lib/claude-json";
 import { toErrorMessage } from "@/app/lib/api-error";
@@ -62,29 +62,6 @@ type ReviewResult = {
     highlight: string;
   };
 };
-
-/**
- * Step C4 (review screen): "turnsAnsweredAlone" for a session, computed the
- * same way handleEnd does it for the current session — pairing turns[i]'s
- * transcript (the student's utterance) with turns[i+1]'s support_given (the
- * tutor's response to it). Used both for the current session and, via
- * fetchPreviousCompletedSession, for the "Last time: N" comparison — that
- * value isn't persisted anywhere, so it's recomputed from that session's
- * own turns rather than adding new DB columns.
- */
-function computeTurnsAnsweredAloneStats(turns: ConversationTurnRow[]): {
-  turnsAnsweredAlone: number;
-  turnsTotal: number;
-} {
-  let turnsTotal = 0;
-  let turnsAnsweredAlone = 0;
-  for (let i = 0; i < turns.length - 1; i++) {
-    if (!turns[i].transcript) continue;
-    turnsTotal++;
-    if (turns[i + 1].support_given === "none") turnsAnsweredAlone++;
-  }
-  return { turnsAnsweredAlone, turnsTotal };
-}
 
 async function askClaudeText(params: {
   system?: string;
@@ -139,6 +116,10 @@ async function handleStart(body: Record<string, unknown>) {
   const language = body.language as string;
   const scenarioId = body.scenarioId as string;
   const plannedDurationSec = body.plannedDurationSec as number;
+  // Step C4.2: ラリー数制。時間ベースの旧クライアントとの互換のため任意扱い。
+  const plannedTurnsRaw = body.plannedTurns as number | undefined;
+  const plannedTurns =
+    typeof plannedTurnsRaw === "number" && Number.isFinite(plannedTurnsRaw) ? plannedTurnsRaw : null;
 
   if (!userId || !language || !scenarioId || !plannedDurationSec) {
     return NextResponse.json(
@@ -179,6 +160,7 @@ async function handleStart(body: Record<string, unknown>) {
     language,
     scenarioId,
     plannedDurationSec,
+    plannedTurns,
     missionCandoIds: missions.map((m) => m.id),
   });
 
@@ -432,9 +414,11 @@ async function handleEnd(body: Record<string, unknown>) {
         events.push({
           phrasesUsed: turns[i].phrases_used ?? [],
           supportGiven: turns[i + 1].support_given,
+          translationShown: turns[i].translation_shown ?? false,
         });
       }
-      turnsAnsweredAlone = events.filter((e) => e.supportGiven === "none").length;
+      // 判定ロジックは computeTurnsAnsweredAloneStats に一本化（2箇所に書かない）。
+      turnsAnsweredAlone = computeTurnsAnsweredAloneStats(turns).turnsAnsweredAlone;
 
       const existingCandos = await fetchUserCandos(supabase, session.user_id, session.language);
       const progressByCandoId = new Map<string, CandoProgressState>(

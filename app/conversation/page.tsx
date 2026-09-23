@@ -22,7 +22,7 @@ import { SCENARIOS, ConversationScenario } from "../lib/conversation-scenarios";
 import { FALLBACK_CLOSING_LINE } from "../lib/conversation-prompts";
 import { useRecorder } from "../lib/use-recorder";
 import { useAudioPlayer } from "../lib/use-audio-player";
-import { getAudioContext, unlockAudio } from "../lib/audio-context";
+import { getAudioContext, unlockAudio, setAudioDebugLogger } from "../lib/audio-context";
 import { fetchWithTimeout } from "../lib/fetch-with-timeout";
 
 const supabase = createClient(
@@ -75,20 +75,26 @@ function formatSpeakingTime(ms: number): string {
   return sec === 0 ? `${min}m` : `${min}m ${sec}s`;
 }
 
-const DURATION_OPTIONS_MIN = [3, 5, 10] as const;
-
-// Safety net: if elapsed time overruns the planned duration by this much and
-// Claude still hasn't returned shouldEnd:true, force-end the session rather
-// than letting the conversation run forever. 180s (rather than a tighter
-// value) leaves room for the closing exchange itself (isClosing is sent at
-// CLOSING_THRESHOLD_SEC remaining) to actually complete: one round trip
-// (record + Whisper + Claude + TTS) can take ~30s, and Claude is told to
-// wrap up over 1-2 turns, so ~2 round trips of headroom are needed.
+// Step C4.2: sessions are now sized by rally count (student utterance +
+// tutor reply = 1 rally), not minutes — a 3-minute pick punished a kid who
+// needed longer to think, since slower thinking meant fewer rallies (less
+// practice) for the same time budget. Rally count removes the time
+// pressure and matches the review screen's "You answered on your own" unit.
+const TURN_COUNT_OPTIONS = [5, 8, 12] as const;
+// isClosing is sent once this many rallies remain (student has completed
+// plannedTurns - 2 rallies already). Not shown to the student during the
+// conversation — see the "会話中の表示" rule in the Step C4.2 instructions.
+const RALLIES_REMAINING_FOR_CLOSING = 2;
+// Safety net only (not a real per-session budget): a session left idle or
+// stuck for this long force-ends regardless of rally count, so a session
+// can never mean "stuck forever". conversation_sessions.planned_duration_sec
+// is NOT NULL, so this fixed value is written even though rally-count
+// sessions aren't actually time-boxed.
+const SAFETY_CAP_DURATION_SEC = 1200; // 20 min
+// Additional overrun budget on top of the safety cap before force-ending,
+// same rationale as before: leaves room for a closing exchange (record +
+// Whisper + Claude + TTS, ~30s per turn) to actually complete.
 const FORCE_END_OVERRUN_SEC = 180;
-// isClosing is sent once remaining time drops below this. 90s (not 45s)
-// gives Claude time to actually finish a natural 1-2 turn closing exchange
-// before the FORCE_END_OVERRUN_SEC fallback would otherwise kick in.
-const CLOSING_THRESHOLD_SEC = 90;
 // How long to wait on the final tutor line (either a real should_end:true
 // reply, or the fixed fallback closing line) before auto-advancing to the
 // result screen, if the user hasn't tapped "Continue" by then.
@@ -126,9 +132,10 @@ export default function ConversationPage() {
     }
   }, []);
 
-  /* ---------------- [1] scenario + duration selection ---------------- */
+  /* ---------------- [1] scenario + rally-count selection ---------------- */
   const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
-  const [selectedDurationMin, setSelectedDurationMin] = useState<number | null>(null);
+  // Step C4.2: replaces the old minutes picker — see TURN_COUNT_OPTIONS.
+  const [selectedTurnCount, setSelectedTurnCount] = useState<number | null>(null);
   const selectedScenario: ConversationScenario | undefined = SCENARIOS.find(
     (s) => s.id === selectedScenarioId
   );
@@ -140,7 +147,14 @@ export default function ConversationPage() {
 
   /* ---------------- session state ---------------- */
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // Fixed safety-cap value, not a real per-session time budget — see
+  // SAFETY_CAP_DURATION_SEC's doc comment. Kept as state (not a constant
+  // read directly) only because plannedDurationSec already existed as the
+  // force-end watchdog's dependency; the value itself never varies.
   const [plannedDurationSec, setPlannedDurationSec] = useState(0);
+  // Step C4.2: the actual session-sizing unit — how many student-utterance
+  // rallies this session is meant to run for.
+  const [plannedTurns, setPlannedTurns] = useState(0);
   const sessionStartedAtRef = useRef<number>(0);
 
   const [currentTurn, setCurrentTurn] = useState<CurrentTurn | null>(null);
@@ -150,6 +164,17 @@ export default function ConversationPage() {
   // single bool) because every tutor bubble gets its own toggle now, not
   // just the latest one.
   const [expandedTranslations, setExpandedTranslations] = useState<Set<string>>(new Set());
+  // Step C4.2 ("Show English as help"): Listen must be tapped at least once
+  // for a given tutor bubble before its Show English button is enabled.
+  // Keyed the same as chatItems (see chatItems below) — since the *current*
+  // (not-yet-answered) tutor turn's key is `t${history.length}`, a fresh
+  // key is used for every new turn automatically, no manual reset needed.
+  const [listenedKeys, setListenedKeys] = useState<Set<string>>(new Set());
+  // Sticky once opened for a given key (never removed even if hidden again)
+  // — "showed English" counts as help regardless of whether it's still open
+  // at send time. Read at send time via key `t${history.length}` to decide
+  // this turn's translationShown flag (see sendTurn below).
+  const [translationShownKeys, setTranslationShownKeys] = useState<Set<string>>(new Set());
   const [retryNotice, setRetryNotice] = useState<string | null>(null);
   // Set only when a turn failed AFTER we already have a transcript (i.e. the
   // /turn call itself failed, not /transcribe). Distinct from errorMessage
@@ -168,6 +193,17 @@ export default function ConversationPage() {
     const t = new Date().toISOString().split("T")[1].replace("Z", "");
     setTimingLog((prev) => [...prev.slice(-29), `${t} ${msg}`]);
   }, []);
+
+  // Step C4.2 (audio re-investigation): registers this page's timingLog as
+  // the sink for audio-context.ts / use-audio-player.ts's logAudioDebug()
+  // calls, so their previously-invisible failure paths (unlockAudio()
+  // exceptions, TTS fetch byte counts, onended completion) show up in the
+  // same ?debug=1 timeline as everything else. addTimingLog is a stable
+  // reference (empty dep array above), so this only needs to run once.
+  useEffect(() => {
+    setAudioDebugLogger(addTimingLog);
+    return () => setAudioDebugLogger(null);
+  }, [addTimingLog]);
   const [elapsedDisplaySec, setElapsedDisplaySec] = useState(0); // updated every second for the debug panel; safe to read during render (state, not a ref/Date.now() call)
 
   const [result, setResult] = useState<EndSessionResult | null>(null);
@@ -221,6 +257,24 @@ export default function ConversationPage() {
 
   const audioPlayer = useAudioPlayer();
 
+  // Investigation item 7: previously, if the TTS fetch/stream failed after
+  // a Listen tap, audioPlayer.state flipped to "error" but nothing on
+  // screen showed it — the Listen button just silently reverted to
+  // "Listen", indistinguishable from never having been pressed. Surfacing
+  // it through the same turnError recovery UI (Try again / End
+  // conversation) as any other mid-conversation failure, per the Step
+  // C4.2 instructions ("turnError と同じ扱いで").
+  useEffect(() => {
+    if (audioPlayer.state !== "error" || !audioPlayer.error) return;
+    // Deferred to a microtask, same pattern as the other debug/watchdog
+    // effects in this file — this reacts to an external signal (playback
+    // failing), not deriving render state, but the lint rule can't tell
+    // the two apart from a plain synchronous setState call.
+    queueMicrotask(() => {
+      setTurnError(`Couldn't play audio: ${audioPlayer.error}`);
+    });
+  }, [audioPlayer.state, audioPlayer.error]);
+
   // Mic/AudioContext pre-warming (done on the [2] intro screen's "Start" tap,
   // itself a user gesture, so it can request mic permission AND unlock
   // playback ahead of time) — see enterConversation() below. State here is
@@ -247,7 +301,7 @@ export default function ConversationPage() {
   // (sessionStartedAtRef) is deliberately NOT started here; that happens in
   // enterConversation() below, only once the user actually presses "Start".
   const startSession = useCallback(async () => {
-    if (!currentUser || !selectedScenario || !selectedDurationMin) return;
+    if (!currentUser || !selectedScenario || !selectedTurnCount) return;
     setBusy(true);
     setBusyMessage("Getting ready...");
     setErrorMessage(null);
@@ -262,7 +316,10 @@ export default function ConversationPage() {
             userId: currentUser.id,
             language: currentUser.language,
             scenarioId: selectedScenario.id,
-            plannedDurationSec: selectedDurationMin * 60,
+            // Fixed safety-cap value written to the NOT NULL column — the
+            // real session-sizing unit is plannedTurns now (see below).
+            plannedDurationSec: SAFETY_CAP_DURATION_SEC,
+            plannedTurns: selectedTurnCount,
           }),
         },
         SESSION_START_TIMEOUT_MS
@@ -274,8 +331,11 @@ export default function ConversationPage() {
       setCurrentTurn({ tutorText: data.tutorText, tutorTextEn: data.tutorTextEn });
       setHistory([]);
       setExpandedTranslations(new Set());
+      setListenedKeys(new Set());
+      setTranslationShownKeys(new Set());
       setRetryNotice(null);
-      setPlannedDurationSec(selectedDurationMin * 60);
+      setPlannedDurationSec(SAFETY_CAP_DURATION_SEC);
+      setPlannedTurns(selectedTurnCount);
       setMissions((data.missions as { candoId: string; en: string; example: string }[]) ?? []);
       setMissionsUsedIds(new Set());
       setTimingLog([
@@ -295,7 +355,7 @@ export default function ConversationPage() {
     } finally {
       setBusy(false);
     }
-  }, [currentUser, selectedScenario, selectedDurationMin]);
+  }, [currentUser, selectedScenario, selectedTurnCount]);
 
   // The "Start" tap on [2]. No conversation network call here (session +
   // missions + opening line were already created by startSession() above) —
@@ -386,7 +446,7 @@ export default function ConversationPage() {
     setMissions([]);
     setResult(null);
     setSelectedScenarioId(null);
-    setSelectedDurationMin(null);
+    setSelectedTurnCount(null);
     setIntroError(null);
     setPhase("select");
   }, []);
@@ -504,10 +564,18 @@ export default function ConversationPage() {
       setBusy(true);
       setBusyMessage("The teacher is thinking...");
 
-      const elapsedSec = (Date.now() - sessionStartedAtRef.current) / 1000;
-      const isClosing = plannedDurationSec - elapsedSec <= CLOSING_THRESHOLD_SEC;
+      // Step C4.2: rally-based, not time-based. The rally the student is
+      // about to complete will become history[history.length] once this
+      // succeeds, so "rallies completed so far" is exactly history.length
+      // right now (before the push below).
+      const ralliesCompletedSoFar = history.length;
+      const isClosing = ralliesCompletedSoFar >= plannedTurns - RALLIES_REMAINING_FOR_CLOSING;
+      // Sticky "Show English was opened for this tutor line" flag — see
+      // translationShownKeys' doc comment. Same key the chatItems below use
+      // for the current (not-yet-answered) tutor bubble.
+      const translationShown = translationShownKeys.has(`t${ralliesCompletedSoFar}`);
       addTimingLog(
-        `turn: elapsed=${elapsedSec.toFixed(0)}s / planned=${plannedDurationSec}s / isClosing=${isClosing}`
+        `turn: rally ${ralliesCompletedSoFar + 1}/${plannedTurns} / isClosing=${isClosing} / translationShown=${translationShown}`
       );
 
       try {
@@ -524,6 +592,7 @@ export default function ConversationPage() {
               // a stray float here breaks the DB write.
               recordingMs: Math.round(totalMs),
               isClosing,
+              translationShown,
             }),
           },
           TURN_TIMEOUT_MS
@@ -558,19 +627,28 @@ export default function ConversationPage() {
         recorder.reset();
         setBusy(false);
 
+        const ralliesCompletedNow = ralliesCompletedSoFar + 1;
         const elapsedAfterSec = (Date.now() - sessionStartedAtRef.current) / 1000;
         if (turnData.shouldEnd) {
           // Claude ended it naturally — its own reply (already set as
           // currentTurn above) IS the closing line. Let the user listen to
           // it / read it before moving on, rather than jumping straight to
           // the result screen.
-          addTimingLog(`shouldEnd:true received at elapsed=${elapsedAfterSec.toFixed(0)}s -> pending end`);
+          addTimingLog(`shouldEnd:true received at rally ${ralliesCompletedNow}/${plannedTurns} -> pending end`);
+          enterPendingEnd();
+        } else if (ralliesCompletedNow >= plannedTurns) {
+          // Reached the selected rally count without Claude volunteering
+          // shouldEnd — its own (non-closing) reply is still shown as the
+          // final line, same as the shouldEnd branch above.
+          addTimingLog(`rally ${ralliesCompletedNow}/${plannedTurns} reached -> pending end`);
           enterPendingEnd();
         } else if (elapsedAfterSec > plannedDurationSec + FORCE_END_OVERRUN_SEC) {
-          // Overrun despite Claude not ending it — override the display with
-          // the fixed closing line instead of Claude's (non-closing) reply.
+          // Safety net only — an idle/stuck session overran the fixed cap
+          // despite the rally count never being reached (see
+          // SAFETY_CAP_DURATION_SEC's doc comment). Overrides the display
+          // with the fixed closing line instead of Claude's reply.
           addTimingLog(
-            `force-end: elapsed=${elapsedAfterSec.toFixed(0)}s > planned(${plannedDurationSec}s)+${FORCE_END_OVERRUN_SEC}s (shouldEnd never received)`
+            `force-end (safety cap): elapsed=${elapsedAfterSec.toFixed(0)}s > cap(${plannedDurationSec}s)+${FORCE_END_OVERRUN_SEC}s`
           );
           enterPendingEnd({ tutorText: FALLBACK_CLOSING_LINE.ja, tutorTextEn: FALLBACK_CLOSING_LINE.en });
         }
@@ -587,7 +665,17 @@ export default function ConversationPage() {
         recorder.reset();
       }
     },
-    [sessionId, currentTurn, plannedDurationSec, enterPendingEnd, addTimingLog, recorder]
+    [
+      sessionId,
+      currentTurn,
+      history.length,
+      plannedTurns,
+      plannedDurationSec,
+      translationShownKeys,
+      enterPendingEnd,
+      addTimingLog,
+      recorder,
+    ]
   );
 
   const handleRecordingComplete = useCallback(
@@ -755,23 +843,23 @@ export default function ConversationPage() {
           </div>
 
           <div style={{ marginBottom: 24 }}>
-            <div style={{ fontSize: 15, marginBottom: 8, color: "#555" }}>How many minutes?</div>
+            <div style={{ fontSize: 15, marginBottom: 8, color: "#555" }}>How many turns?</div>
             <div style={{ display: "flex", gap: 12 }}>
-              {DURATION_OPTIONS_MIN.map((min) => (
+              {TURN_COUNT_OPTIONS.map((count) => (
                 <button
-                  key={min}
-                  onClick={() => setSelectedDurationMin(min)}
+                  key={count}
+                  onClick={() => setSelectedTurnCount(count)}
                   style={{
                     flex: 1,
                     padding: "14px 0",
                     borderRadius: 12,
                     fontSize: 18,
-                    border: selectedDurationMin === min ? "3px solid #ff8c42" : "1px solid #ddd",
-                    background: selectedDurationMin === min ? "#fff3e6" : "white",
+                    border: selectedTurnCount === count ? "3px solid #ff8c42" : "1px solid #ddd",
+                    background: selectedTurnCount === count ? "#fff3e6" : "white",
                     cursor: "pointer",
                   }}
                 >
-                  {min} min
+                  {count}
                 </button>
               ))}
             </div>
@@ -783,16 +871,16 @@ export default function ConversationPage() {
 
           <button
             onClick={startSession}
-            disabled={!selectedScenario || !selectedDurationMin || busy}
+            disabled={!selectedScenario || !selectedTurnCount || busy}
             style={{
               width: "100%",
               padding: 16,
               fontSize: 18,
               borderRadius: 12,
               border: "none",
-              background: selectedScenario && selectedDurationMin ? "#ff8c42" : "#eee",
-              color: selectedScenario && selectedDurationMin ? "white" : "#aaa",
-              cursor: selectedScenario && selectedDurationMin && !busy ? "pointer" : "not-allowed",
+              background: selectedScenario && selectedTurnCount ? "#ff8c42" : "#eee",
+              color: selectedScenario && selectedTurnCount ? "white" : "#aaa",
+              cursor: selectedScenario && selectedTurnCount && !busy ? "pointer" : "not-allowed",
             }}
           >
             {busy ? busyMessage || "Getting ready..." : "Next"}
@@ -1213,7 +1301,17 @@ export default function ConversationPage() {
     });
   });
   if (currentTurn) {
-    chatItems.push({ key: "t-current", role: "tutor", text: currentTurn.tutorText, textEn: currentTurn.tutorTextEn });
+    // Step C4.2: keyed by the index this turn will occupy once answered
+    // (matches how `t${i}` keys are built above for history), so every new
+    // tutor turn gets a fresh, never-reused key automatically — that's what
+    // makes the Listen-gate + per-turn reset for Show English (see
+    // listenedKeys/translationShownKeys) work without any manual clearing.
+    chatItems.push({
+      key: `t${history.length}`,
+      role: "tutor",
+      text: currentTurn.tutorText,
+      textEn: currentTurn.tutorTextEn,
+    });
   }
 
   return (
@@ -1307,14 +1405,41 @@ export default function ConversationPage() {
                     audioPlayer.play(item.text);
                     addTimingLog(`Listen tap (after unlockAudio): ctx.state=${getAudioContext().state}`);
                     setAudioCtxState(getAudioContext().state);
+                    // Step C4.2: unlocks this bubble's Show English button.
+                    setListenedKeys((prev) => {
+                      if (prev.has(item.key)) return prev;
+                      const next = new Set(prev);
+                      next.add(item.key);
+                      return next;
+                    });
                   }}
                   style={{ background: "none", border: "none", color: "#888", fontSize: 12, cursor: "pointer", padding: 0 }}
                 >
                   🔊 {audioPlayer.state === "loading" ? "..." : "Listen"}
                 </button>
                 <button
-                  onClick={() => toggleTranslation(item.key)}
-                  style={{ background: "none", border: "none", color: "#888", fontSize: 12, cursor: "pointer", padding: 0 }}
+                  onClick={() => {
+                    if (!listenedKeys.has(item.key)) return;
+                    // Opening (not closing) counts as "used help" — sticky,
+                    // never removed even if hidden again afterward.
+                    if (!expandedTranslations.has(item.key)) {
+                      setTranslationShownKeys((prev) => {
+                        const next = new Set(prev);
+                        next.add(item.key);
+                        return next;
+                      });
+                    }
+                    toggleTranslation(item.key);
+                  }}
+                  disabled={!listenedKeys.has(item.key)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    color: listenedKeys.has(item.key) ? "#888" : "#ccc",
+                    fontSize: 12,
+                    cursor: listenedKeys.has(item.key) ? "pointer" : "default",
+                    padding: 0,
+                  }}
                 >
                   {expandedTranslations.has(item.key) ? "Hide English" : "Show English"}
                 </button>
@@ -1510,6 +1635,8 @@ export default function ConversationPage() {
           actualSettings={recorder.actualSettings}
           elapsedSec={elapsedDisplaySec}
           plannedDurationSec={plannedDurationSec}
+          ralliesCompleted={history.length}
+          plannedTurns={plannedTurns}
           timingLog={timingLog}
           micPermission={micPermission}
           audioCtxState={audioCtxState}
@@ -1570,6 +1697,8 @@ function DebugPanel(props: {
   actualSettings: string;
   elapsedSec: number;
   plannedDurationSec: number;
+  ralliesCompleted: number;
+  plannedTurns: number;
   timingLog: string[];
   micPermission: "unknown" | "granted" | "denied";
   audioCtxState: AudioContextState | "unknown";
@@ -1595,9 +1724,9 @@ function DebugPanel(props: {
       {open && (
         <div style={{ padding: 16, fontSize: 12 }}>
           <div style={{ marginBottom: 8, fontWeight: "bold" }}>
-            elapsed: {props.elapsedSec.toFixed(0)}s / planned: {props.plannedDurationSec}s / remaining:{" "}
-            {(props.plannedDurationSec - props.elapsedSec).toFixed(0)}s / isClosing now:{" "}
-            {String(props.plannedDurationSec - props.elapsedSec <= CLOSING_THRESHOLD_SEC)}
+            rallies: {props.ralliesCompleted}/{props.plannedTurns} / isClosing now:{" "}
+            {String(props.ralliesCompleted >= props.plannedTurns - RALLIES_REMAINING_FOR_CLOSING)} / elapsed:{" "}
+            {props.elapsedSec.toFixed(0)}s (safety cap: {props.plannedDurationSec}s)
           </div>
           <div style={{ marginBottom: 8, fontWeight: "bold" }}>
             mic: {props.micPermission} / audio: {props.audioCtxState}

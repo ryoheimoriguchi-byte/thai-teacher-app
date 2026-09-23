@@ -24,6 +24,9 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/listening", icon: "🎧", label: "Listen" },
   { href: "/speaking", icon: "🎤", label: "Speak" },
   { href: "/reading", icon: "📖", label: "Read", jpOnly: true },
+  // Step C5: entry point to /conversation. JP only (same gating as
+  // Achievement) — /conversation-lab stays out of the nav either way.
+  { href: "/conversation", icon: "💬", label: "Tutor", jpOnly: true },
   { href: "/achievement", icon: "🏆", label: "Award", jpOnly: true },
   { href: "/vocabulary", icon: "⋯", label: "More" },
 ];
@@ -85,7 +88,7 @@ export function BottomNav() {
           const active =
             item.href === "/"
               ? pathname === "/"
-              : pathname.startsWith(item.href);
+              : pathname === item.href || pathname.startsWith(`${item.href}/`);
           const showBadge = item.href === "/achievement" && unviewedBadges > 0;
           return (
             <Link
