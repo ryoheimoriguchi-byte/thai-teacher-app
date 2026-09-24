@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { buildConversationPrompt } from "@/app/lib/conversation-prompts";
-import { getVocabCategories } from "@/app/lib/conversation-scenarios";
+import { getVocabCategories, pickScenarioVariation } from "@/app/lib/conversation-scenarios";
 import { getCando, type ConversationCando } from "@/app/lib/conversation-candos";
 import {
   getSupabaseClient,
@@ -133,6 +133,7 @@ export async function POST(req: NextRequest) {
       isOpening: false,
       isClosing,
       missions,
+      variation: pickScenarioVariation(session.scenario_id, session.id),
     });
 
     const nextTurn = await callClaudeForJson<TurnReply>(async () => {

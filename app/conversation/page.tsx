@@ -454,7 +454,11 @@ export default function ConversationPage() {
   const endSession = useCallback(async () => {
     if (!sessionId) return;
     setBusy(true);
-    setBusyMessage("Wrapping up...");
+    // Step C4.2 (real-device bug): the /session end call scores every turn
+    // in one Claude request, which took ~10s on a real device. Distinct
+    // message from mid-conversation's "The teacher is thinking..." so it's
+    // clear this is the end-of-session review, not a stuck turn.
+    setBusyMessage("Looking back at your conversation...");
     try {
       const actualDurationSec = Math.round((Date.now() - sessionStartedAtRef.current) / 1000);
       const res = await fetchWithTimeout(
@@ -1493,9 +1497,21 @@ export default function ConversationPage() {
         <div ref={chatEndRef} />
       </div>
 
-      {/* Fixed footer: mic button / status / recovery actions. */}
+      {/* Fixed footer: mic button / status / recovery actions.
+          Step C4.2 (real-device bug): `busy` is checked BEFORE `pendingEnd`
+          now — previously pendingEnd's branch took priority even while
+          endSession() was in flight (busy===true && pendingEnd===true
+          simultaneously, e.g. right after tapping Continue, or when the
+          auto-advance timer fires endSession() on its own), so the screen
+          kept showing the same "Continue" button with no feedback for the
+          ~10s the end-of-session review call took — looked frozen. */}
       <div style={{ borderTop: "1px solid #eee", background: "white", padding: "16px 20px", flexShrink: 0 }}>
-        {pendingEnd ? (
+        {busy ? (
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 28, marginBottom: 4 }}>💭</div>
+            <div style={{ fontSize: 15, color: "#666" }}>{busyMessage}</div>
+          </div>
+        ) : pendingEnd ? (
           <div style={{ textAlign: "center" }}>
             <div style={{ fontSize: 13, color: "#888", marginBottom: 12 }}>
               Listen to the teacher, then continue when you&apos;re ready.
@@ -1560,11 +1576,6 @@ export default function ConversationPage() {
                 End conversation
               </button>
             </div>
-          </div>
-        ) : busy ? (
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 28, marginBottom: 4 }}>💭</div>
-            <div style={{ fontSize: 15, color: "#666" }}>{busyMessage}</div>
           </div>
         ) : (
           <div style={{ textAlign: "center" }}>
@@ -1704,6 +1715,50 @@ function DebugPanel(props: {
   audioCtxState: AudioContextState | "unknown";
 }) {
   const [open, setOpen] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+
+  // Step C4.2 (2026-09-24): a real-device bug can only be diagnosed from
+  // this log, and a missed screenshot loses it forever — this copies
+  // timingLog + debugLog together as plain text so it can be pasted
+  // anywhere (chat, notes, etc.) regardless of format.
+  const copyLog = () => {
+    const text = [
+      `=== timingLog (${props.timingLog.length}) ===`,
+      props.timingLog.length === 0 ? "(none)" : props.timingLog.join("\n"),
+      "",
+      `=== recorder debugLog (${props.debugLog.length}) ===`,
+      props.debugLog.length === 0 ? "(none)" : props.debugLog.join("\n"),
+    ].join("\n");
+
+    const markResult = (ok: boolean) => {
+      setCopyStatus(ok ? "copied" : "failed");
+      window.setTimeout(() => setCopyStatus("idle"), 2000);
+    };
+
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(
+        () => markResult(true),
+        () => markResult(false)
+      );
+      return;
+    }
+    // Fallback for browsers without the async Clipboard API.
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(textarea);
+      markResult(ok);
+    } catch {
+      markResult(false);
+    }
+  };
+
   return (
     <div style={{ borderTop: "3px solid #999", background: "#f5f5f5", color: "#111" }}>
       <button
@@ -1723,6 +1778,21 @@ function DebugPanel(props: {
       </button>
       {open && (
         <div style={{ padding: 16, fontSize: 12 }}>
+          <button
+            type="button"
+            onClick={copyLog}
+            style={{
+              marginBottom: 12,
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: "1px solid #999",
+              background: copyStatus === "copied" ? "#c8e9c8" : copyStatus === "failed" ? "#f8caca" : "white",
+              fontSize: 12,
+              cursor: "pointer",
+            }}
+          >
+            {copyStatus === "copied" ? "✅ Copied!" : copyStatus === "failed" ? "❌ Copy failed" : "📋 Copy log"}
+          </button>
           <div style={{ marginBottom: 8, fontWeight: "bold" }}>
             rallies: {props.ralliesCompleted}/{props.plannedTurns} / isClosing now:{" "}
             {String(props.ralliesCompleted >= props.plannedTurns - RALLIES_REMAINING_FOR_CLOSING)} / elapsed:{" "}

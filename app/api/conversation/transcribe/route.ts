@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { transcribeAudio } from "@/app/lib/whisper";
+import { buildWhisperPrompt, getVocabCategories } from "@/app/lib/conversation-scenarios";
+import { getSupabaseClient, getConversationSession, fetchMasteredWords } from "@/app/lib/conversation-db";
 import { toErrorMessage } from "@/app/lib/api-error";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -58,8 +60,30 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Step C4.2: prime Whisper with this session's scenario phrases +
+    // mastered vocabulary, to cut down on the child-speech mis-hearing that
+    // was corrupting both Claude's replies and can-do/scoring judgment.
+    // Best-effort — a failure to build the prompt must never block
+    // transcription itself, so this never throws past this block.
+    let prompt: string | undefined;
+    try {
+      const supabase = getSupabaseClient();
+      const session = await getConversationSession(supabase, sessionId);
+      if (session) {
+        const masteredWords = await fetchMasteredWords(
+          supabase,
+          session.user_id,
+          session.language,
+          getVocabCategories(session.scenario_id)
+        );
+        prompt = buildWhisperPrompt(session.scenario_id, masteredWords);
+      }
+    } catch (e) {
+      console.error("Failed to build Whisper prompt, transcribing without one:", e);
+    }
+
     // この段階では DB には書かない。DB への保存は /turn 側で行う。
-    const transcript = await transcribeAudio(audio, "ja");
+    const transcript = await transcribeAudio(audio, "ja", prompt);
 
     // 無音・聞き取り不能で空文字が返ることがあるが、ここではエラーにしない。呼び出し側が判断する。
     let transcriptKana = transcript;

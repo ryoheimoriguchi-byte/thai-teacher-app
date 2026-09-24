@@ -265,6 +265,8 @@ export interface ConversationPromptOptions {
   isClosing: boolean;
   /** このセッションで提示するミッション（0〜2件）。freetalk では常に空配列。 */
   missions?: ConversationCando[];
+  /** T-30: シナリオの場面バリエーション。SCENARIO_INSTRUCTIONS の直後に注入する。 */
+  variation?: string | null;
 }
 
 export function buildConversationPrompt(o: ConversationPromptOptions): string {
@@ -284,6 +286,9 @@ export function buildConversationPrompt(o: ConversationPromptOptions): string {
 
   if (scenario) {
     parts.push(SCENARIO_INSTRUCTIONS[scenario.id] ?? '');
+  }
+  if (o.variation) {
+    parts.push(`## きょうの 場面\n${o.variation}`);
   }
 
   if (o.isOpening) parts.push(OPENING_INSTRUCTION);

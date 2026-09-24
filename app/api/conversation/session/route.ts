@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { buildConversationPrompt, buildReviewPrompt } from "@/app/lib/conversation-prompts";
-import { getScenario, getVocabCategories } from "@/app/lib/conversation-scenarios";
+import { getScenario, getVocabCategories, pickScenarioVariation } from "@/app/lib/conversation-scenarios";
 import {
   ALL_CANDOS,
   selectMissionCandos,
@@ -171,6 +171,7 @@ async function handleStart(body: Record<string, unknown>) {
     isOpening: true,
     isClosing: false,
     missions,
+    variation: pickScenarioVariation(scenarioId, session.id),
   });
 
   const opening = await callClaudeForJson<OpeningReply>(() =>

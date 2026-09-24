@@ -46,6 +46,12 @@ export interface ConversationScenario {
    * コスト削減として本採用。Step B 補足検証タスク5参照）。
    */
   vocabCategories: string[] | null;
+  /**
+   * Step C4.2 (T-30): 同じシナリオを繰り返しても場面設定が毎回変わるようにする。
+   * フレーズ・can-do は共通のまま、system prompt に注入する場面だけを差し替える。
+   * DB には保存しない（pickScenarioVariation が sessionId から安定して選ぶ）。
+   */
+  variations: string[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -332,7 +338,22 @@ const COMMON_PHRASES: ConversationPhrase[] = [
     ja: 'もういちど いってください',
     en: 'Please say it again',
     cardWords: ['もういちどいってください', 'ゆっくりいってください', 'まってください'],
-    variants: ['もういちど', 'ゆっくり いってください', 'まってください'],
+    // 2026-09-24 (real-device bug, session 78e13d8e turn_index 3): Mirei
+    // said 「ゆっくりしゃべってくれる」asking the tutor to slow down — a
+    // textbook S1-basic-03 (方略 can-do) moment — but the variant list only
+    // had the polite/full form, so it likely wouldn't have been judged as a
+    // match. Added colloquial/child forms of "say it again" / "speak
+    // slowly" so Claude's review judgment can actually catch these.
+    variants: [
+      'もういちど',
+      'ゆっくり いってください',
+      'まってください',
+      'ゆっくり はなして',
+      'ゆっくり いって',
+      'ゆっくり しゃべって',
+      'なんて？',
+    ],
+    note: '子供らしい口語表現（「ゆっくりしゃべってくれる」など）も、依頼の意図が同じなら達成とみなす',
   },
   {
     id: 'P-03',
@@ -410,6 +431,13 @@ export const SCENARIOS: ConversationScenario[] = [
     clearThreshold: 0.7,
     phrases: SHOPPING_PHRASES,
     vocabCategories: ['Food', 'Number', 'Greetings', 'Adjectives', 'Useful Phrases', 'Colors'],
+    variations: [
+      'パンやさん。あさごはんを かいにきた',
+      'くだものやさん。おやつを かいにきた',
+      'おかしやさん。ともだちの たんじょうびプレゼントを かいにきた',
+      'おもちゃやさん。おこづかいで かいたいものが ある',
+      'ぶんぼうぐやさん。がっこうで つかうものを かいにきた',
+    ],
   },
   {
     id: 'family',
@@ -421,6 +449,11 @@ export const SCENARIOS: ConversationScenario[] = [
     clearThreshold: 0.7,
     phrases: FAMILY_PHRASES,
     vocabCategories: ['Family', 'Adjectives', 'Greetings', 'Useful Phrases', 'Common Verbs'],
+    variations: [
+      'あたらしい ともだちに かぞくの はなしを する',
+      'しゃしんを みせながら かぞくを しょうかいする',
+      'せんせいに かぞくの ことを きかれた',
+    ],
   },
   {
     id: 'school',
@@ -440,6 +473,11 @@ export const SCENARIOS: ConversationScenario[] = [
       'Useful Phrases',
       'Places',
     ],
+    variations: [
+      'きょう がっこうで あったことを はなす',
+      'すきな じゅぎょうの はなしを する',
+      'ともだちと あそんだ はなしを する',
+    ],
   },
   {
     id: 'food',
@@ -451,6 +489,11 @@ export const SCENARIOS: ConversationScenario[] = [
     clearThreshold: 0.7,
     phrases: FOOD_PHRASES,
     vocabCategories: ['Food', 'Adjectives', 'Common Verbs', 'Health & Body', 'Greetings', 'Useful Phrases'],
+    variations: [
+      'すきな たべものの はなしを する',
+      'きのう たべたものの はなしを する',
+      'つくってみたい りょうりの はなしを する',
+    ],
   },
   {
     id: 'freetalk',
@@ -462,6 +505,11 @@ export const SCENARIOS: ConversationScenario[] = [
     clearThreshold: 0,
     phrases: [],
     vocabCategories: null,
+    variations: [
+      'きょう あったことを はなす',
+      'すきなものの はなしを する',
+      'しゅうまつの よていを はなす',
+    ],
   },
 ];
 
@@ -487,6 +535,22 @@ export function getScenario(id: string): ConversationScenario | undefined {
 }
 
 /**
+ * Picks one variation for a session without writing to the DB.
+ * sessionId is hashed so start + every later /turn get the same scene
+ * (Math.random() at start would be lost on the next serverless invocation).
+ */
+export function pickScenarioVariation(scenarioId: string, sessionId: string): string | null {
+  const scenario = getScenario(scenarioId);
+  const list = scenario?.variations ?? [];
+  if (list.length === 0) return null;
+  let hash = 0;
+  for (let i = 0; i < sessionId.length; i++) {
+    hash = (hash * 31 + sessionId.charCodeAt(i)) >>> 0;
+  }
+  return list[hash % list.length];
+}
+
+/**
  * そのシナリオで mastered 語彙を絞り込む cards.category の一覧。
  * シナリオが見つからない、または絞り込み設定が null の場合は undefined
  * （呼び出し側で「絞り込まない」の意味として扱う）。
@@ -500,4 +564,31 @@ export function scenariosForPhrase(phraseJa: string): string[] {
   return SCENARIOS.filter((s) => s.phrases.some((p) => p.ja === phraseJa)).map(
     (s) => s.id
   );
+}
+
+/**
+ * Step C4.2 (real-device bug): Whisper badly mis-hears children's speech
+ * without priming (e.g. 「りんごをください」→「リングをください」、
+ * 「ピザが すき」→「キザが すき」), which then feeds garbage into Claude's
+ * reply and into can-do/scoring judgment. Whisper's `prompt` parameter
+ * biases recognition toward likely vocabulary — this builds that text from
+ * the scenario's own phrases (highest priority — these are literally what
+ * the student is being guided to say) and the student's mastered
+ * vocabulary, capped at ~100 words total since long prompts reportedly stop
+ * helping. Phrases come first in the list so truncation drops mastered
+ * words, not scenario phrases.
+ */
+export function buildWhisperPrompt(scenarioId: string, masteredWords: string[]): string {
+  const scenario = getScenario(scenarioId);
+  const phraseWords: string[] = [];
+  if (scenario) {
+    for (const p of scenario.phrases) {
+      phraseWords.push(p.ja, ...p.variants);
+    }
+  }
+  const uniquePhraseWords = Array.from(new Set(phraseWords.filter(Boolean)));
+  const combined = Array.from(new Set([...uniquePhraseWords, ...masteredWords]));
+  const limited = combined.slice(0, 100);
+  const context = "子供が話す、ひらがな中心のやさしい日本語です。";
+  return limited.length > 0 ? `${context} よく出てくる語句: ${limited.join("、")}` : context;
 }
