@@ -269,13 +269,12 @@ export function useRecorder(options: UseRecorderOptions) {
           noiseSuppression: true,
         },
       });
-      addDebugLog("getUserMedia resolved");
+      addDebugLog(`getUserMedia resolved: ctx.state=${getAudioContext().state}`);
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
       addDebugLog(`getUserMedia rejected: ${err.name}: ${err.message}`);
       setRecordingError(
-        `❌ Could not access the microphone (${err.name}: ${err.message}). ` +
-          `Allow microphone access in your browser settings, then tap again.`
+        "Microphone access is needed to talk. Please allow it in Safari settings."
       );
       setRecState("idle");
       return;

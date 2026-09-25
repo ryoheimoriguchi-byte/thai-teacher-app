@@ -275,14 +275,10 @@ export default function ConversationPage() {
     });
   }, [audioPlayer.state, audioPlayer.error]);
 
-  // Mic/AudioContext pre-warming (done on the [2] intro screen's "Start" tap,
-  // itself a user gesture, so it can request mic permission AND unlock
-  // playback ahead of time) — see enterConversation() below. State here is
-  // read by the ?debug=1 panel only; never shown in the normal UI.
+  // ?debug=1 only. Mic permission is requested on the first record tap
+  // (hypothesis A), not on Start — see enterConversation() below.
   const [micPermission, setMicPermission] = useState<"unknown" | "granted" | "denied">("unknown");
   const [audioCtxState, setAudioCtxState] = useState<AudioContextState | "unknown">("unknown");
-  const [introError, setIntroError] = useState<string | null>(null);
-  const [preparingStart, setPreparingStart] = useState(false);
 
   // Chat-style layout (#5): auto-scroll to the newest message whenever the
   // chat log grows (a new tutor reply, a new student line, or the pending
@@ -359,60 +355,26 @@ export default function ConversationPage() {
 
   // The "Start" tap on [2]. No conversation network call here (session +
   // missions + opening line were already created by startSession() above) —
-  // instead, this is where mic permission and TTS playback get unlocked,
-  // since this tap is itself a user gesture.
+  // only unlockAudio(), then enter the conversation screen.
   //
-  // Previously, the FIRST recording tap on the conversation screen did
-  // double duty as both "get mic permission" and "unlock AudioContext for
-  // TTS", which was confusing for a first-time child user: the permission
-  // dialog would pop up mid-recording, and the tutor's voice couldn't be
-  // played until it was dismissed. Doing both here means both are already
-  // resolved by the time the conversation screen appears.
+  // Hypothesis A (2026-09-25, confirmed by real-device logs): calling
+  // getUserMedia here popped the iOS mic-permission dialog between Start
+  // and the first Listen. Web Audio then played to completion (TTS 200,
+  // ~250KB, every chunk's onended fired) but no sound was audible —
+  // the native audio session's output path was dead. Recording later
+  // called getUserMedia again and rebuilt that session, which is why
+  // Listen started working after the first recording. So Start must NOT
+  // call getUserMedia. Mic permission is deferred to the first record
+  // tap (use-recorder.ts already calls getUserMedia there).
   const enterConversation = useCallback(() => {
-    setIntroError(null);
-    setPreparingStart(true);
-
-    // Must be called synchronously in this click handler, before any
-    // `await` below — see audio-context.ts's unlockAudio() doc comment for
-    // why. Logged to timingLog (visible in ?debug=1) so the before/after
-    // state around the mic permission dialog can actually be verified on
-    // a real device, per the Step C4.1 investigation.
     addTimingLog(`Start tap: ctx.state=${getAudioContext().state}`);
     unlockAudio();
     setAudioCtxState(getAudioContext().state);
     addTimingLog(`unlockAudio done: ctx.state=${getAudioContext().state}`);
 
-    (async () => {
-      // Mic permission: request-then-immediately-release. This call is only
-      // to trigger/resolve the permission prompt ahead of time; it must NOT
-      // hold the stream open (an iOS mic-in-use indicator lit for the whole
-      // conversation would be alarming). The actual recording still calls
-      // getUserMedia again for real, per recording, in use-recorder.ts.
-      try {
-        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        micStream.getTracks().forEach((t) => t.stop());
-        setMicPermission("granted");
-      } catch {
-        setMicPermission("denied");
-        setIntroError(
-          "Microphone access is needed to talk. Please allow it in Safari settings."
-        );
-        setPreparingStart(false);
-        return; // stay on the intro screen — don't enter a conversation the mic can't drive
-      }
-
-      // State right after the mic permission dialog has closed — this is
-      // the moment the investigation found iOS Safari can silently
-      // re-suspend an already-"running" context (dialogs act like a brief
-      // backgrounding of the page).
-      addTimingLog(`mic dialog closed: ctx.state=${getAudioContext().state}`);
-      setAudioCtxState(getAudioContext().state);
-
-      sessionStartedAtRef.current = Date.now();
-      setElapsedDisplaySec(0);
-      setPreparingStart(false);
-      setPhase("conversation");
-    })();
+    sessionStartedAtRef.current = Date.now();
+    setElapsedDisplaySec(0);
+    setPhase("conversation");
   }, [addTimingLog]);
 
   // [2] "← Choose a different topic": since startSession() (above) already
@@ -434,7 +396,6 @@ export default function ConversationPage() {
     }
     setSessionId(null);
     setMissions([]);
-    setIntroError(null);
     setPhase("select");
   }, [sessionId]);
 
@@ -447,7 +408,6 @@ export default function ConversationPage() {
     setResult(null);
     setSelectedScenarioId(null);
     setSelectedTurnCount(null);
-    setIntroError(null);
     setPhase("select");
   }, []);
 
@@ -560,6 +520,23 @@ export default function ConversationPage() {
       handleRecordingCompleteRef.current(blob, mimeType, totalMs);
     }, []),
   });
+
+  // Mic permission is now first requested on the record tap (hypothesis A).
+  // Surface denial through the same Try again / End conversation recovery
+  // as any other mid-conversation failure, and keep ?debug=1's mic: label
+  // in sync.
+  useEffect(() => {
+    if (recorder.recState === "recording") {
+      queueMicrotask(() => setMicPermission("granted"));
+    }
+  }, [recorder.recState]);
+  useEffect(() => {
+    if (!recorder.recordingError) return;
+    queueMicrotask(() => {
+      setMicPermission("denied");
+      setTurnError(recorder.recordingError);
+    });
+  }, [recorder.recordingError]);
 
   // The actual /turn call.
   const sendTurn = useCallback(
@@ -943,13 +920,8 @@ export default function ConversationPage() {
             </div>
           )}
 
-          {introError && (
-            <div style={{ color: "#c00", marginBottom: 16, fontSize: 14 }}>⚠️ {introError}</div>
-          )}
-
           <button
             onClick={enterConversation}
-            disabled={preparingStart}
             style={{
               width: "100%",
               padding: 16,
@@ -958,11 +930,10 @@ export default function ConversationPage() {
               border: "none",
               background: "#ff8c42",
               color: "white",
-              cursor: preparingStart ? "default" : "pointer",
-              opacity: preparingStart ? 0.7 : 1,
+              cursor: "pointer",
             }}
           >
-            {preparingStart ? "Getting ready..." : "Start"}
+            Start
           </button>
         </div>
       </main>
