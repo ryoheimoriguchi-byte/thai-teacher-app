@@ -1,0 +1,33 @@
+# Language App - Project Rules
+
+## 技術スタック
+- Next.js (App Router) + TypeScript
+- Supabase (Postgres) - DB / Auth
+- Vercel - デプロイ
+- ブラウザ Web Speech API - 発音
+- xlsx - Excel取り込み
+
+## ファイル構成
+- app/ : Next.js App Router のページ
+- app/lib/ : 共有ユーティリティ（users.ts など）
+- Supabase クライアントは各ページで createClient
+
+## DB スキーマ（主要テーブル）
+- cards: id, word, pronunciation, meaning, category, language, breakdown
+- word_progress: user_id, card_id, module, direction, consecutive_correct, mastered, mastered_at
+- study_sessions: user_id, studied_date, module
+
+## コーディング規約
+- "use client" を必要なページの先頭に
+- スタイルは現状インラインstyle（後でリファクタの可能性あり）
+- ユーザー切り替えは localStorage の currentUserId
+
+## 開発者について
+- プログラミング初心者
+- 説明は日本語、コードのコメントは英語OK
+- 大きな変更の前に「何を変えるか」を一度説明してから実装する
+- エラーが出たら、ターミナルログを読んで自分で修正してから報告する
+
+## 触らない
+- .env.local（環境変数）
+- node_modules/
